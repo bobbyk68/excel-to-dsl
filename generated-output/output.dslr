@@ -1,0 +1,30 @@
+rule "ChargesTypeCode_4/9"
+when
+    the ProcedureCategory is H1,H3,H4,H5
+    and the DeclarationType is A,D,Y,Z
+    br675_1791
+then
+    System.out.println("ERROR: UNKNOWN");
+end
+rule "StatementCode_2/2"
+when
+    the ProcedureCategory is H1,H3,H4,H5
+    and the DeclarationType is A,D,Y,Z
+    br675_1792
+then
+    System.out.println("ERROR: UNKNOWN");
+end
+rule "Authorisation Type Code_3/39"
+when
+    the ProcedureCategory is H1,H2,H3,H4,H5,H8,I1,C21I,C21IEIDR,FSD,SRDS
+    and the DeclarationType is A
+    and the DeclarationType is D
+    and the DeclarationType is Y
+    and the DeclarationType is Z
+    and the DeclarationType is C
+    and the DeclarationType is J
+    and the DeclarationType is F
+    br675_1738
+then
+    System.out.println("ERROR: UNKNOWN");
+end
