@@ -23,6 +23,7 @@ public class ExcelReader {
                 Row row = iterator.next();
                 rowIndex++;
                 if (rowIndex == 1) continue; // Skip header row
+
                 if (row.getZeroHeight()) continue; // Skip hidden rows
 
                 Cell col1 = row.getCell(0); // Description
@@ -41,27 +42,23 @@ public class ExcelReader {
 
                 List<String> conditions = new ArrayList<>();
                 String errorMsg = "E000X";
-                boolean foundIf = false;
+                boolean started = false;
 
                 for (String line : lines) {
                     line = line.trim();
-                    if (line.isEmpty()) continue;
-
-                    if (!foundIf) {
-                        if (line.toLowerCase().startsWith("if")) {
-                            foundIf = true;
-                            conditions.add(line);
-                        }
-                        continue;
+                    if (!started && line.toLowerCase().startsWith("if")) {
+                        started = true;
                     }
-
+                    if (!started) continue;
                     if (line.matches("E\\d{4}")) {
                         errorMsg = line;
-                        break;
+                    } else if (!line.isEmpty()) {
+                        if (line.toLowerCase().startsWith("if ")) {
+                            conditions.add(line);
+                        } else if (line.toLowerCase().startsWith("then ")) {
+                            conditions.add(line.replaceFirst("then ", "if ")); // Treat 'then' as another 'if'
+                        }
                     }
-
-                    // Keep "then ..." lines as conditions too
-                    conditions.add(line);
                 }
 
                 rows.add(new RuleRow(name, procCategory, declType, conditions, errorMsg));

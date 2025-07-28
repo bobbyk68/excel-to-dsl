@@ -1,6 +1,9 @@
 package com.example.dslgen.pattern;
 
-import java.util.regex.*;
+import com.example.dslgen.DslBuilder;
+
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public enum WhenPatternRule {
     NOT_PRESENT("if (.+) is not present", "{0} is not present", "!declaration.hasField(\"{0}\")"),
@@ -13,27 +16,42 @@ public enum WhenPatternRule {
     NONE_OF_MUST_APPEAR("none of (.+) must appear", "none of {0} must appear", "!declaration.anyPresent({0})");
 
     private final Pattern pattern;
-    private final String dslKey;
-    private final String javaTemplate;
+    private final String dslKeyTemplate;
+    private final String rhsTemplate;
+    private String resolvedLhs;
+    private String resolvedRhs;
 
-    WhenPatternRule(String regex, String dslKey, String javaTemplate) {
+    WhenPatternRule(String regex, String dslKeyTemplate, String rhsTemplate) {
         this.pattern = Pattern.compile(regex, Pattern.CASE_INSENSITIVE);
-        this.dslKey = dslKey;
-        this.javaTemplate = javaTemplate;
+        this.dslKeyTemplate = dslKeyTemplate;
+        this.rhsTemplate = rhsTemplate;
+    }
+
+    public boolean matches(String input) {
+        Matcher matcher = pattern.matcher(input);
+        if (!matcher.matches()) return false;
+
+        resolvedLhs = dslKeyTemplate;
+        resolvedRhs = rhsTemplate;
+        for (int i = 0; i < matcher.groupCount(); i++) {
+            String val = matcher.group(i + 1);
+            resolvedLhs = resolvedLhs.replace("{" + i + "}", val);
+            resolvedRhs = resolvedRhs.replace("{" + i + "}", val);
+        }
+        return true;
+    }
+
+    public String getLhs() {
+        return resolvedLhs;
+    }
+
+    public String getRhs() {
+        return resolvedRhs;
     }
 
     public DslBuilder.ParsedDsl tryMatch(String input) {
-        Matcher matcher = pattern.matcher(input);
-        if (matcher.matches()) {
-            String[] args = new String[matcher.groupCount()];
-            for (int i = 0; i < matcher.groupCount(); i++) args[i] = matcher.group(i + 1);
-            String key = dslKey;
-            String value = javaTemplate;
-            for (int i = 0; i < args.length; i++) {
-                key = key.replace("{" + i + "}", args[i]);
-                value = value.replace("{" + i + "}", args[i]);
-            }
-            return new DslBuilder.ParsedDsl(key, value);
+        if (matches(input)) {
+            return new DslBuilder.ParsedDsl(resolvedLhs, resolvedRhs);
         }
         return null;
     }
