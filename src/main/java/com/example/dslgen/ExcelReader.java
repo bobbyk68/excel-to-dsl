@@ -23,7 +23,6 @@ public class ExcelReader {
                 Row row = iterator.next();
                 rowIndex++;
                 if (rowIndex == 1) continue; // Skip header row
-
                 if (row.getZeroHeight()) continue; // Skip hidden rows
 
                 Cell col1 = row.getCell(0); // Description
@@ -40,10 +39,32 @@ public class ExcelReader {
                 String pseudocode = col5.getStringCellValue().trim();
                 String[] lines = pseudocode.split("\n");
 
-                String condition = lines.length > 0 ? lines[0].trim() : "";
-                String errorMsg = lines.length > 1 ? lines[1].trim() : "E000X";
+                List<String> conditions = new ArrayList<>();
+                String errorMsg = "E000X";
+                boolean foundIf = false;
 
-                rows.add(new RuleRow(name, procCategory, declType, condition, errorMsg));
+                for (String line : lines) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+
+                    if (!foundIf) {
+                        if (line.toLowerCase().startsWith("if")) {
+                            foundIf = true;
+                            conditions.add(line);
+                        }
+                        continue;
+                    }
+
+                    if (line.matches("E\\d{4}")) {
+                        errorMsg = line;
+                        break;
+                    }
+
+                    // Keep "then ..." lines as conditions too
+                    conditions.add(line);
+                }
+
+                rows.add(new RuleRow(name, procCategory, declType, conditions, errorMsg));
             }
         }
 
@@ -54,4 +75,3 @@ public class ExcelReader {
         return cell == null || cell.getCellType() == CellType.BLANK || cell.toString().trim().isEmpty();
     }
 }
-// ExcelReader.java
