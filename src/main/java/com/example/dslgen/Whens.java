@@ -3,7 +3,7 @@ package com.example.dslgen;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public enum WhenPatternRule {
+public enum Whens {
     MISSING_FIELD(
         new String[]{
             "(?i)if (\\w+) is missing",
@@ -42,7 +42,7 @@ public enum WhenPatternRule {
     private final String lhsTemplate;
     private final String rhsTemplate;
 
-    WhenPatternRule(String[] regexes, String lhsTemplate, String rhsTemplate) {
+    Whens(String[] regexes, String lhsTemplate, String rhsTemplate) {
         this.patterns = new Pattern[regexes.length];
         for (int i = 0; i < regexes.length; i++) {
             this.patterns[i] = Pattern.compile(regexes[i]);
