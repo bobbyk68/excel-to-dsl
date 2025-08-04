@@ -36,7 +36,7 @@ public class DslBuilder {
 
             for (String cond : row.getConditions()) {
                 boolean matched = false;
-                for (WhenPatternRule rule : WhenPatternRule.values()) {
+                for (Whens rule : Whens.values()) {
                     ParsedDsl parsed = rule.tryMatch(cond);
                     if (parsed != null) {
                         if (seenConditions.add(parsed.getLhs())) {
