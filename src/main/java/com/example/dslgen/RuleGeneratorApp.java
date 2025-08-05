@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.List;
 
+
 public class RuleGeneratorApp {
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
