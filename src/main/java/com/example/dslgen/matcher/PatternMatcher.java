@@ -1,41 +1,41 @@
-package com.example.dslgen.matcher;
+package com.example.dslgen.pattern;
 
-import com.example.dslgen.builder.DslBuilder.ParsedDsl;
-import com.example.dslgen.pattern.PatternRule;
-import com.example.dslgen.pattern.PatternDefinition;
-import com.example.dslgen.pattern.PatternLoader;
+import com.example.dslgen.builder.DslBuilder;
+import com.example.dslgen.pattern.loader.PatternDefinition;
 
 import java.util.ArrayList;
 import java.util.List;
 
 public class PatternMatcher {
 
-    private final List<PatternRule> rules = new ArrayList<>();
+    private final List<PatternDefinition> definitions;
 
     public PatternMatcher(List<PatternDefinition> definitions) {
-        for (PatternDefinition def : definitions) {
-            rules.add(def::tryMatch);
-        }
+        this.definitions = definitions;
     }
 
-    public ParsedDsl tryMatch(String line) {
-        for (PatternRule rule : rules) {
-            ParsedDsl result = rule.tryMatch(line);
-            if (result != null) {
-                return result;
+    public DslBuilder.ParsedDsl tryMatch(String line) {
+        for (PatternDefinition def : definitions) {
+            DslBuilder.ParsedDsl parsed = def.tryMatch(line);
+            if (parsed != null) {
+                return parsed;
             }
         }
         return null;
     }
 
-    public static PatternMatcher fromJsonOrEnum(String resourcePath, List<PatternDefinition> enumDefs) {
-        List<PatternDefinition> allDefs = new ArrayList<>(enumDefs);
-        try {
-            List<PatternDefinition> jsonDefs = PatternLoader.load(resourcePath);
-            allDefs.addAll(jsonDefs);
-        } catch (Exception e) {
-            System.out.println("📂 No JSON found or failed to load from: " + resourcePath + " — falling back to enum only.");
+    public List<PatternDefinition> getDefinitions() {
+        return definitions;
+    }
+
+    public List<DslBuilder.ParsedDsl> tryMatchAll(String line) {
+        List<DslBuilder.ParsedDsl> matches = new ArrayList<>();
+        for (PatternDefinition def : definitions) {
+            DslBuilder.ParsedDsl parsed = def.tryMatch(line);
+            if (parsed != null) {
+                matches.add(parsed);
+            }
         }
-        return new PatternMatcher(allDefs);
+        return matches;
     }
 }
