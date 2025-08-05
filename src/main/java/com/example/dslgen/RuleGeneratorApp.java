@@ -1,5 +1,8 @@
-// RuleGeneratorApp.java
 package com.example.dslgen;
+
+import com.example.dslgen.builder.DslBuilder;
+import com.example.dslgen.pattern.HybridThenPattern;
+import com.example.dslgen.pattern.HybridWhenPattern;
 
 import java.io.FileWriter;
 import java.nio.file.Files;
@@ -24,7 +27,11 @@ public class RuleGeneratorApp {
             throw new IllegalArgumentException("Unsupported file type: " + inputPath);
         }
 
-        DslBuilder builder = new DslBuilder();
+        // 🔁 Use hybrid matchers here
+        HybridWhenPattern whenMatcher = new HybridWhenPattern();
+        HybridThenPattern thenMatcher = new HybridThenPattern();
+
+        DslBuilder builder = new DslBuilder(whenMatcher, thenMatcher);
         DslBuilder.Result result = builder.build(rules);
 
         Files.createDirectories(Paths.get("output"));

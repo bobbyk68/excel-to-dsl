@@ -1,6 +1,8 @@
 // ExcelToDslGenerator.java
 package com.example.dslgen;
 
+import com.example.dslgen.builder.DslBuilder;
+
 import java.io.FileWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;

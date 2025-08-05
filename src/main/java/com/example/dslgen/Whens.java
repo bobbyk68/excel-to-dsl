@@ -1,5 +1,7 @@
 package com.example.dslgen;
 
+import com.example.dslgen.builder.DslBuilder;
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 

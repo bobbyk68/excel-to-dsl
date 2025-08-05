@@ -1,4 +1,7 @@
-package com.example.dslgen;
+package com.example.dslgen.builder;
+
+import com.example.dslgen.RuleRow;
+import com.example.dslgen.matcher.PatternMatcher;
 
 import java.util.*;
 
@@ -27,6 +30,14 @@ public class DslBuilder {
         public final List<String> dslrLines = new ArrayList<>();
     }
 
+    private final PatternMatcher whenMatcher;
+    private final PatternMatcher thenMatcher;
+
+    public DslBuilder(PatternMatcher whenMatcher, PatternMatcher thenMatcher) {
+        this.whenMatcher = whenMatcher;
+        this.thenMatcher = thenMatcher;
+    }
+
     public Result build(List<RuleRow> rules) {
         Result result = new Result();
         Set<String> seenConditions = new HashSet<>();
@@ -35,19 +46,13 @@ public class DslBuilder {
             List<String> conditionKeys = new ArrayList<>();
 
             for (String cond : row.getConditions()) {
-                boolean matched = false;
-                for (Whens rule : Whens.values()) {
-                    ParsedDsl parsed = rule.tryMatch(cond);
-                    if (parsed != null) {
-                        if (seenConditions.add(parsed.getLhs())) {
-                            result.dslLines.add("[when] " + parsed.getLhs() + " = " + parsed.getRhs());
-                        }
-                        conditionKeys.add(parsed.getLhs());
-                        matched = true;
-                        break;
+                ParsedDsl parsed = whenMatcher.tryMatch(cond);
+                if (parsed != null) {
+                    if (seenConditions.add(parsed.getLhs())) {
+                        result.dslLines.add("[when] " + parsed.getLhs() + " = " + parsed.getRhs());
                     }
-                }
-                if (!matched) {
+                    conditionKeys.add(parsed.getLhs());
+                } else {
                     System.out.println("⚠️ Unmatched WHEN pattern: " + cond);
                 }
             }
@@ -60,7 +65,17 @@ public class DslBuilder {
                 result.dslrLines.add("    and " + key);
             }
             result.dslrLines.add("then");
-            result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
+
+            ParsedDsl thenParsed = thenMatcher.tryMatch(row.getErrorMessage());
+            if (thenParsed != null) {
+                if (seenConditions.add(thenParsed.getLhs())) {
+                    result.dslLines.add("[then] " + thenParsed.getLhs() + " = " + thenParsed.getRhs());
+                }
+                result.dslrLines.add("    " + thenParsed.getLhs());
+            } else {
+                result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
+            }
+
             result.dslrLines.add("end\n");
         }
 
