@@ -7,23 +7,7 @@ import java.util.*;
 
 public class DslBuilder {
 
-    public static class ParsedDsl {
-        private final String lhs;
-        private final String rhs;
-
-        public ParsedDsl(String lhs, String rhs) {
-            this.lhs = lhs;
-            this.rhs = rhs;
-        }
-
-        public String getLhs() {
-            return lhs;
-        }
-
-        public String getRhs() {
-            return rhs;
-        }
-    }
+    public record ParsedDsl(String lhs, String rhs) {}
 
     public static class Result {
         public final List<String> dslLines = new ArrayList<>();
@@ -40,42 +24,50 @@ public class DslBuilder {
 
     public Result build(List<RuleRow> rules) {
         Result result = new Result();
-        Set<String> seenConditions = new HashSet<>();
+        Set<String> seenWhens = new HashSet<>();
+        Set<String> seenThens = new HashSet<>();
 
         for (RuleRow row : rules) {
-            List<String> conditionKeys = new ArrayList<>();
-
+            List<String> whenKeys = new ArrayList<>();
             for (String cond : row.getConditions()) {
                 ParsedDsl parsed = whenMatcher.tryMatch(cond);
                 if (parsed != null) {
-                    if (seenConditions.add(parsed.getLhs())) {
-                        result.dslLines.add("[when] " + parsed.getLhs() + " = " + parsed.getRhs());
+                    if (seenWhens.add(parsed.lhs())) {
+                        result.dslLines.add("[when] " + parsed.lhs() + " = " + parsed.rhs());
                     }
-                    conditionKeys.add(parsed.getLhs());
+                    whenKeys.add(parsed.lhs());
                 } else {
-                    System.out.println("⚠️ Unmatched WHEN pattern: " + cond);
+                    System.out.println("⚠️ Unmatched WHEN: " + cond);
                 }
             }
 
+            // Handle THEN
+            List<String> thenKeys = new ArrayList<>();
+            String fallbackAction = "System.out.println(\"ERROR: " + row.getErrorCode() + "\");";
+            String actionText = "ERROR: " + row.getErrorCode();
+            ParsedDsl thenParsed = thenMatcher.tryMatch(actionText);
+
+            if (thenParsed != null) {
+                if (seenThens.add(thenParsed.lhs())) {
+                    result.dslLines.add("[then] " + thenParsed.lhs() + " = " + thenParsed.rhs());
+                }
+                thenKeys.add(thenParsed.lhs());
+            } else {
+                thenKeys.add(fallbackAction);
+            }
+
+            // Build DSLR Rule
             result.dslrLines.add("rule \"" + row.getName() + "\"");
             result.dslrLines.add("when");
             result.dslrLines.add("    the ProcedureCategory is " + row.getProcedureCategory());
             result.dslrLines.add("    and the DeclarationType is " + row.getDeclarationType());
-            for (String key : conditionKeys) {
-                result.dslrLines.add("    and " + key);
+            for (String k : whenKeys) {
+                result.dslrLines.add("    and " + k);
             }
             result.dslrLines.add("then");
-
-            ParsedDsl thenParsed = thenMatcher.tryMatch(row.getErrorMessage());
-            if (thenParsed != null) {
-                if (seenConditions.add(thenParsed.getLhs())) {
-                    result.dslLines.add("[then] " + thenParsed.getLhs() + " = " + thenParsed.getRhs());
-                }
-                result.dslrLines.add("    " + thenParsed.getLhs());
-            } else {
-                result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
+            for (String k : thenKeys) {
+                result.dslrLines.add("    " + k);
             }
-
             result.dslrLines.add("end\n");
         }
 

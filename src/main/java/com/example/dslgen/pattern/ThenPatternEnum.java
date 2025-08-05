@@ -2,7 +2,7 @@ package com.example.dslgen.pattern;
 
 import java.util.List;
 
-public enum ThenPatternEnum implements PatternDefinitionProvider {
+public enum ThenPatternEnum implements com.example.dslgen.pattern.PatternDefinitionProvider {
     ERROR_PRINT("print error (E\\d{4})", "print error {code}", "System.out.println(\"ERROR: {code}\");");
 
     public String getPattern() {

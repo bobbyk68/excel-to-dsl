@@ -1,5 +1,6 @@
 package com.example.dslgen.pattern.loader;
 
+import com.example.dslgen.pattern.HybridPatternRule;
 import com.example.dslgen.pattern.PatternRule;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,7 +18,7 @@ public class PatternLoader {
     // Main method to call: loads JSON rules and returns them as PatternRule implementations
     public static List<PatternRule> loadFromJson(String path) {
         try (InputStream in = Files.newInputStream(Paths.get(path))) {
-            List<PatternDefinition> rules = objectMapper.readValue(in, new TypeReference<>() {});
+            List<HybridPatternRule.PatternDefinition> rules = objectMapper.readValue(in, new TypeReference<>() {});
             return Collections.unmodifiableList(rules);  // defensively return unmodifiable list
         } catch (Exception e) {
             System.err.println("⚠️ Failed to load pattern definitions from JSON: " + e.getMessage());

@@ -8,19 +8,19 @@ import java.util.Arrays;
 import java.util.List;
 
 public class HybridThenPattern implements PatternRule {
-    private final List<PatternDefinition> definitions = new ArrayList<>();
+    private final List<HybridPatternRule.PatternDefinition> definitions = new ArrayList<>();
 
     public HybridThenPattern() {
         // Load from enum first
         for (ThenPatternEnum e : ThenPatternEnum.values()) {
-            definitions.add(new PatternDefinition(
+            definitions.add(new HybridPatternRule.PatternDefinition(
                 Arrays.asList(e.getPatterns()),
                 e.getLhs(),
                 e.getRhs()
             ));
         }
         // Load from JSON file if available
-        definitions.addAll(PatternLoader.loadFromJson("then-patterns.json"));
+        definitions.addAll(com.example.dslgen.pattern.loader.PatternLoader.loadFromJson("then-patterns.json"));
     }
 
     @Override
