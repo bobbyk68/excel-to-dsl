@@ -1,46 +1,32 @@
-package com.example.dslgen.pattern;
-
-import java.io.*;
-import java.util.*;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
 package com.example.dslgen.pattern.loader;
 
-import java.io.InputStreamReader;
-import java.nio.file.*;
-import java.util.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.dslgen.pattern.PatternRule;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Collections;
+import java.util.List;
 
 public class PatternLoader {
 
-    public static List<PatternDefinition> load(Class<? extends PatternDefinitionSource> enumClass, String jsonPath) {
-        List<PatternDefinition> definitions = new ArrayList<>();
+    private static final ObjectMapper objectMapper = new ObjectMapper();
 
-        // 1. Load from enum
-        if (enumClass.isEnum()) {
-            for (PatternDefinitionSource e : enumClass.getEnumConstants()) {
-                definitions.add(new PatternDefinition(
-                        Arrays.asList(e.getPatterns()),
-                        e.getLhs(),
-                        e.getRhs()
-                ));
-            }
+    // Main method to call: loads JSON rules and returns them as PatternRule implementations
+    public static List<PatternRule> loadFromJson(String path) {
+        try (InputStream in = Files.newInputStream(Paths.get(path))) {
+            List<PatternDefinition> rules = objectMapper.readValue(in, new TypeReference<>() {});
+            return Collections.unmodifiableList(rules);  // defensively return unmodifiable list
+        } catch (Exception e) {
+            System.err.println("⚠️ Failed to load pattern definitions from JSON: " + e.getMessage());
+            return Collections.emptyList();
         }
+    }
 
-        // 2. Load from JSON file if exists
-        Path path = Paths.get(jsonPath);
-        if (Files.exists(path)) {
-            try (InputStreamReader reader = new InputStreamReader(Files.newInputStream(path))) {
-                ObjectMapper mapper = new ObjectMapper();
-                List<PatternDefinition> fromFile = mapper.readValue(reader, new TypeReference<>() {});
-                definitions.addAll(fromFile);
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to load pattern definitions from: " + jsonPath, e);
-            }
-        }
-
-        return definitions;
+    // Optional legacy alias
+    public static List<PatternRule> load(String path) {
+        return loadFromJson(path);
     }
 }
