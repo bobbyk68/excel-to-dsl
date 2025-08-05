@@ -1,43 +1,40 @@
-package com.example.dslgen.matcher;
+package uk.gov.h.pseudocode.matcher;
 
-import com.example.dslgen.builder.DslBuilder;
-import com.example.dslgen.pattern.PatternRule;
-import com.example.dslgen.pattern.loader.PatternDefinition;
-import com.example.dslgen.pattern.loader.PatternLoader;
-import com.example.dslgen.pattern.when.WhenPatternEnum;
-import com.example.dslgen.pattern.then.ThenPatternEnum;
+import uk.gov.h.pseudocode.pattern.PatternDefinition;
+import uk.gov.h.pseudocode.pattern.loader.PatternLoader;
+import uk.gov.h.pseudocode.pattern.matcher.PatternMatcher;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 public class HybridPatternMatcher implements PatternMatcher {
 
     private final List<PatternDefinition> definitions = new ArrayList<>();
 
-    public HybridPatternMatcher(String type) {
-        // Load enums first
-        if ("when".equalsIgnoreCase(type)) {
-            Arrays.stream(WhenPatternEnum.values())
-                  .map(e -> new PatternDefinition(e.getPatterns(), e.getLhs(), e.getRhs()))
-                  .forEach(definitions::add);
-        } else if ("then".equalsIgnoreCase(type)) {
-            Arrays.stream(ThenPatternEnum.values())
-                  .map(e -> new PatternDefinition(e.getPatterns(), e.getLhs(), e.getRhs()))
-                  .forEach(definitions::add);
-        }
+    public HybridPatternMatcher(List<PatternDefinition> fromEnum) {
+        this(fromEnum, null);
+    }
 
-        // Load from JSON
-        List<PatternDefinition> jsonDefs = PatternLoader.loadFromJson(type);
-        if (jsonDefs != null) {
-            definitions.addAll(jsonDefs);
+    public HybridPatternMatcher(List<PatternDefinition> fromEnum, Path jsonPath) {
+        definitions.addAll(fromEnum);
+
+        if (jsonPath != null && Files.exists(jsonPath)) {
+            try {
+                List<PatternDefinition> fromJson = PatternLoader.load(jsonPath);
+                definitions.addAll(fromJson);
+                System.out.println("✅ Loaded " + fromJson.size() + " patterns from JSON");
+            } catch (Exception e) {
+                System.err.println("⚠️ Failed to load patterns from JSON: " + e.getMessage());
+            }
         }
     }
 
     @Override
-    public DslBuilder.ParsedDsl tryMatch(String line) {
-        for (PatternRule def : definitions) {
-            DslBuilder.ParsedDsl parsed = def.tryMatch(line);
+    public ParsedDsl tryMatch(String line) {
+        for (PatternDefinition def : definitions) {
+            ParsedDsl parsed = def.tryMatch(line);
             if (parsed != null) return parsed;
         }
         return null;
