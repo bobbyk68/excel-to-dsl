@@ -5,20 +5,42 @@ import java.util.*;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+package com.example.dslgen.pattern.loader;
+
+import java.io.InputStreamReader;
+import java.nio.file.*;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+
 public class PatternLoader {
-    public static List<PatternDefinition> loadFromEnum(PatternDefinitionProvider provider) {
-        return provider.getPatternDefinitions();
-    }
 
-    public static List<PatternDefinition> loadFromJson(String path) {
-        try {
-            File file = new File(path);
-            if (!file.exists()) return Collections.emptyList();
+    public static List<PatternDefinition> load(Class<? extends PatternDefinitionSource> enumClass, String jsonPath) {
+        List<PatternDefinition> definitions = new ArrayList<>();
 
-            ObjectMapper mapper = new ObjectMapper();
-            return mapper.readValue(file, new TypeReference<List<PatternDefinition>>() {});
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to load JSON: " + path, e);
+        // 1. Load from enum
+        if (enumClass.isEnum()) {
+            for (PatternDefinitionSource e : enumClass.getEnumConstants()) {
+                definitions.add(new PatternDefinition(
+                        Arrays.asList(e.getPatterns()),
+                        e.getLhs(),
+                        e.getRhs()
+                ));
+            }
         }
+
+        // 2. Load from JSON file if exists
+        Path path = Paths.get(jsonPath);
+        if (Files.exists(path)) {
+            try (InputStreamReader reader = new InputStreamReader(Files.newInputStream(path))) {
+                ObjectMapper mapper = new ObjectMapper();
+                List<PatternDefinition> fromFile = mapper.readValue(reader, new TypeReference<>() {});
+                definitions.addAll(fromFile);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to load pattern definitions from: " + jsonPath, e);
+            }
+        }
+
+        return definitions;
     }
 }
