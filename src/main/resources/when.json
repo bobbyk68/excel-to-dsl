@@ -1,0 +1,17 @@
+[
+  {
+    "regex": ["there is at least one goods item"],
+    "lhs": "there is at least one goods item",
+    "rhs": "goodsItemList.size() > 0"
+  },
+  {
+    "regex": ["goods item must contain additional documents"],
+    "lhs": "goods item must contain additional documents",
+    "rhs": "goodsItem.additionalDocuments != null"
+  },
+  {
+    "regex": ["declaration has type (\\w+)"],
+    "lhs": "declaration has type {val}",
+    "rhs": "declaration.type == \"{val}\""
+  }
+]
