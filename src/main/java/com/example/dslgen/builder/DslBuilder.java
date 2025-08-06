@@ -24,18 +24,18 @@ public class DslBuilder {
 
     public Result build(List<RuleRow> rules) {
         Result result = new Result();
-        Set<String> seenWhens = new HashSet<>();
-        Set<String> seenThens = new HashSet<>();
+        Map<String, String> lhsToRhsMap = new LinkedHashMap<>(); // Preserve order and avoid duplicates
+
 
         for (RuleRow row : rules) {
-            List<String> whenKeys = new ArrayList<>();
+            List<String> conditionKeys = new ArrayList<>();
+
             for (String cond : row.getConditions()) {
                 ParsedDsl parsed = whenMatcher.tryMatch(cond);
+
                 if (parsed != null) {
-                    if (seenWhens.add(parsed.lhs())) {
-                        result.dslLines.add("[when] " + parsed.lhs() + " = " + parsed.rhs());
-                    }
-                    whenKeys.add(parsed.lhs());
+                    lhsToRhsMap.putIfAbsent(parsed.lhs, parsed.rhs);
+                    conditionKeys.add("[when] " + parsed.lhs() + " = " + parsed.rhs());
                 } else {
                     System.out.println("⚠️ Unmatched WHEN: " + cond);
                 }
@@ -45,15 +45,15 @@ public class DslBuilder {
             List<String> thenKeys = new ArrayList<>();
             String fallbackAction = "System.out.println(\"ERROR: " + row.getErrorCode() + "\");";
             String actionText = "ERROR: " + row.getErrorCode();
+
+
             ParsedDsl thenParsed = thenMatcher.tryMatch(actionText);
 
             if (thenParsed != null) {
-                if (seenThens.add(thenParsed.lhs())) {
-                    result.dslLines.add("[then] " + thenParsed.lhs() + " = " + thenParsed.rhs());
-                }
-                thenKeys.add(thenParsed.lhs());
+                result.dslLines.add("[then] " + thenParsed.lhs + " = " + thenParsed.rhs);
+                result.dslrLines.add("    " + thenParsed.lhs);
             } else {
-                thenKeys.add(fallbackAction);
+                result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
             }
 
             // Build DSLR Rule
@@ -61,7 +61,7 @@ public class DslBuilder {
             result.dslrLines.add("when");
             result.dslrLines.add("    the ProcedureCategory is " + row.getProcedureCategory());
             result.dslrLines.add("    and the DeclarationType is " + row.getDeclarationType());
-            for (String k : whenKeys) {
+            for (String k : conditionKeys) {
                 result.dslrLines.add("    and " + k);
             }
             result.dslrLines.add("then");
