@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rule Editor</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light p-4">
+  <div class="container">
+    <div class="card shadow-sm p-4">
+      <h2 class="mb-3 text-primary">Add or Update Rule</h2>
+      <form id="ruleForm">
+        <div class="mb-3">
+          <label class="form-label">Pattern Type</label>
+          <input class="form-control" name="patternType" required />
+        </div>
+        <div class="mb-3">
+          <label class="form-label">LHS</label>
+          <input class="form-control" name="lhs" required />
+        </div>
+        <div class="mb-3">
+          <label class="form-label">RHS</label>
+          <input class="form-control" name="rhs" required />
+        </div>
+        <input type="hidden" id="editId" value="">
+        <button type="submit" class="btn btn-success w-100">Add Rule</button>
+      </form>
+    </div>
+
+    <div class="card mt-4 p-4 shadow-sm">
+      <h3 class="mb-3 text-primary">Existing Rules</h3>
+      <table class="table table-bordered table-striped" id="rulesTable">
+        <thead>
+          <tr>
+            <th>Pattern Type</th>
+            <th>LHS</th>
+            <th>RHS</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('ruleForm');
+    const rulesTable = document.querySelector('#rulesTable tbody');
+
+    async function loadRules() {
+      const res = await fetch('/api/rules');
+      if (!res.ok) return;
+      const rules = await res.json();
+      rulesTable.innerHTML = '';
+      rules.forEach((r) => {
+        rulesTable.innerHTML += `<tr>
+          <td>${r.patternType}</td>
+          <td>${r.lhs}</td>
+          <td>${r.rhs}</td>
+          <td><button class="btn btn-sm btn-outline-primary" onclick="editRuleById('${r.id}')">Edit</button></td>
+        </tr>`;
+      });
+    }
+
+    function editRuleById(id) {
+      fetch('/api/rules')
+        .then(res => res.json())
+        .then(rules => {
+          const rule = rules.find(r => r.id === id);
+          form.patternType.value = rule.patternType;
+          form.lhs.value = rule.lhs;
+          form.rhs.value = rule.rhs;
+          document.getElementById('editId').value = rule.id;
+          form.querySelector('button').textContent = "Update Rule";
+        });
+    }
+
+    form.onsubmit = async function (e) {
+      e.preventDefault();
+      const data = {
+        patternType: form.patternType.value,
+        lhs: form.lhs.value,
+        rhs: form.rhs.value
+      };
+      const id = document.getElementById('editId').value;
+
+      if (!id) {
+        await fetch('/api/rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+      } else {
+        await fetch(`/api/rules/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        document.getElementById('editId').value = '';
+        form.querySelector('button').textContent = "Add Rule";
+      }
+
+      form.reset();
+      loadRules();
+    };
+
+    loadRules();
+  </script>
+</body>
+</html>
