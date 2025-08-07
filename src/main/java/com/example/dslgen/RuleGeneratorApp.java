@@ -1,14 +1,16 @@
 package com.example.dslgen;
 
 import com.example.dslgen.builder.DslBuilder;
-import com.example.dslgen.pattern.HybridThenPattern;
-import com.example.dslgen.pattern.HybridWhenPattern;
+import com.example.dslgen.pattern.HybridPatternMatcher;
+import com.example.dslgen.pattern.PatternMatcher;
+import com.example.dslgen.pattern.ThenPatternEnum;
+import com.example.dslgen.pattern.WhenPatternEnum;
 
 import java.io.FileWriter;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.List;
-
+import java.util.*;
+import java.util.regex.*;
 
 public class RuleGeneratorApp {
     public static void main(String[] args) throws Exception {
@@ -28,20 +30,40 @@ public class RuleGeneratorApp {
             throw new IllegalArgumentException("Unsupported file type: " + inputPath);
         }
 
-        // 🔁 Use hybrid matchers here
-        HybridWhenPattern whenMatcher = new HybridWhenPattern();
-        HybridThenPattern thenMatcher = new HybridThenPattern();
+        // Group rules by prefix extracted from name (e.g., BR678)
+        Map<String, List<RuleRow>> groupedRules = new HashMap<>();
+        Pattern pattern = Pattern.compile("^(BR\\d+)"); // e.g., "BR678"
 
-        DslBuilder builder = new DslBuilder(whenMatcher, thenMatcher);
-        DslBuilder.Result result = builder.build(rules);
-
-        Files.createDirectories(Paths.get("output"));
-        try (FileWriter dsl = new FileWriter("output/rules.dsl");
-             FileWriter dslr = new FileWriter("output/rules.dslr")) {
-            for (String line : result.dslLines) dsl.write(line + "\n");
-            for (String line : result.dslrLines) dslr.write(line + "\n");
+        for (RuleRow row : rules) {
+            Matcher matcher = pattern.matcher(row.getName());
+            if (matcher.find()) {
+                String prefix = matcher.group(1);
+                groupedRules.computeIfAbsent(prefix, k -> new ArrayList<>()).add(row);
+            } else {
+                System.err.println("⚠️ No rule prefix found in name: " + row.getName());
+            }
         }
 
-        System.out.println("✅ DSL and DSLR generation completed.");
+        // Create DSL and DSLR output per group
+        PatternMatcher whenMatcher = new HybridPatternMatcher(List.of(WhenPatternEnum.values()));
+        PatternMatcher thenMatcher = new HybridPatternMatcher(List.of(ThenPatternEnum.values()));
+        DslBuilder builder = new DslBuilder(whenMatcher, thenMatcher);
+
+        Files.createDirectories(Paths.get("output"));
+
+        for (Map.Entry<String, List<RuleRow>> entry : groupedRules.entrySet()) {
+            String prefix = entry.getKey();
+            List<RuleRow> group = entry.getValue();
+
+            DslBuilder.Result result = builder.build(group);
+
+            try (FileWriter dsl = new FileWriter("output/" + prefix + "_rules.dsl");
+                 FileWriter dslr = new FileWriter("output/" + prefix + "_rules.dslr")) {
+                for (String line : result.dslLines) dsl.write(line + "\n");
+                for (String line : result.dslrLines) dslr.write(line + "\n");
+            }
+
+            System.out.println("✅ Generated: " + prefix + "_rules.dsl and .dslr");
+        }
     }
 }
