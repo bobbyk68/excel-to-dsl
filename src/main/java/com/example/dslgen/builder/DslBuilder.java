@@ -1,13 +1,13 @@
 package com.example.dslgen.builder;
 
 import com.example.dslgen.RuleRow;
-import com.example.dslgen.matcher.PatternMatcher;
+import com.example.dslgen.pattern.PatternMatcher;
 
 import java.util.*;
 
 public class DslBuilder {
 
-    public record ParsedDsl(String lhs, String rhs) {}
+    public record ParsedDsl(String rawLhs, String renderedLhs, String rawRhs, String renderedRhs) {}
 
     public static class Result {
         public final List<String> dslLines = new ArrayList<>();
@@ -24,50 +24,47 @@ public class DslBuilder {
 
     public Result build(List<RuleRow> rules) {
         Result result = new Result();
-        Map<String, String> lhsToRhsMap = new LinkedHashMap<>(); // Preserve order and avoid duplicates
-
+        Set<String> seenDslConditions = new HashSet<>();
 
         for (RuleRow row : rules) {
             List<String> conditionKeys = new ArrayList<>();
 
             for (String cond : row.getConditions()) {
                 ParsedDsl parsed = whenMatcher.tryMatch(cond);
-
                 if (parsed != null) {
-                    lhsToRhsMap.putIfAbsent(parsed.lhs, parsed.rhs);
-                    conditionKeys.add("[when] " + parsed.lhs() + " = " + parsed.rhs());
+                    // ✅ Only add to DSL file once
+                    if (seenDslConditions.add(parsed.rawLhs())) {
+                        result.dslLines.add("[when] " + parsed.rawLhs() + " = \"" + parsed.rawRhs() + "\"");
+                    }
+                    // ✅ Always collect for DSLR
+                    conditionKeys.add(parsed.renderedLhs());
                 } else {
-                    System.out.println("⚠️ Unmatched WHEN: " + cond);
+                    System.out.println("⚠️ Unmatched WHEN condition: " + cond);
                 }
             }
 
-            // Handle THEN
-            List<String> thenKeys = new ArrayList<>();
-            String fallbackAction = "System.out.println(\"ERROR: " + row.getErrorCode() + "\");";
-            String actionText = "ERROR: " + row.getErrorCode();
-
-
-            ParsedDsl thenParsed = thenMatcher.tryMatch(actionText);
-
-            if (thenParsed != null) {
-                result.dslLines.add("[then] " + thenParsed.lhs + " = " + thenParsed.rhs);
-                result.dslrLines.add("    " + thenParsed.lhs);
-            } else {
-                result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
+            // ✅ Then clause
+            ParsedDsl thenParsed = thenMatcher != null ? thenMatcher.tryMatch(row.getAction()) : null;
+            if (thenParsed != null && seenDslConditions.add(thenParsed.rawLhs())) {
+                result.dslLines.add("[then] " + thenParsed.rawLhs() + " = " + thenParsed.rawRhs());
             }
 
-            // Build DSLR Rule
+            // ✅ DSLR Generation
             result.dslrLines.add("rule \"" + row.getName() + "\"");
             result.dslrLines.add("when");
             result.dslrLines.add("    the ProcedureCategory is " + row.getProcedureCategory());
             result.dslrLines.add("    and the DeclarationType is " + row.getDeclarationType());
-            for (String k : conditionKeys) {
-                result.dslrLines.add("    and " + k);
+            for (String key : conditionKeys) {
+                result.dslrLines.add("    and " + key);
             }
             result.dslrLines.add("then");
-            for (String k : thenKeys) {
-                result.dslrLines.add("    " + k);
+
+            if (thenParsed != null) {
+                result.dslrLines.add("    " + thenParsed.renderedRhs() + ";");
+            } else {
+                result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
             }
+
             result.dslrLines.add("end\n");
         }
 
