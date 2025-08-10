@@ -1,0 +1,55 @@
+// 1) Read your existing header from disk (or classpath)
+private String readHeader() {
+    try {
+        // if it's on disk (dev): 
+        Path p = Path.of("src/main/resources/rules/_header.drl");
+        if (java.nio.file.Files.exists(p)) {
+            return java.nio.file.Files.readString(p);
+        }
+        // else fall back to classpath (packaged jar)
+        try (var in = getClass().getResourceAsStream("/rules/_header.drl")) {
+            if (in == null) throw new IllegalStateException("Missing /rules/_header.drl");
+            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+    } catch (Exception e) {
+        throw new RuntimeException("Failed to load header DRL", e);
+    }
+}
+
+// 2) During hot reload build
+void rebuild(Map<Path,String> expandedDrls) {
+    var ks = org.kie.api.KieServices.Factory.get();
+    var rid = ks.newReleaseId("com.example","hotrules","1.0."+System.currentTimeMillis());
+    var kfs = ks.newKieFileSystem().generateAndWritePomXML(rid);
+
+    // Write header first (as-is)
+    String header = readHeader();
+    kfs.write("src/main/resources/rules/_header.drl", header);
+
+    // Then write each expanded DRL, ensuring same package as header
+    int i = 0;
+    for (var e : expandedDrls.entrySet()) {
+        String drl = ensurePackage(e.getValue(), "rules"); // or match the header's package
+        kfs.write("src/main/resources/rules/_exp_" + (i++) + ".drl", drl);
+    }
+
+    var kb = ks.newKieBuilder(kfs).buildAll();
+    var res = kb.getResults();
+    if (res.hasMessages(org.kie.api.builder.Message.Level.ERROR)) {
+        res.getMessages(org.kie.api.builder.Message.Level.ERROR).forEach(System.err::println);
+        return; // keep old container
+    }
+    var newC = ks.newKieContainer(rid);
+    var old = containerRef.getAndSet(newC);
+    if (old != null) old.dispose();
+    System.out.println("✅ Reloaded with shared header");
+}
+
+private static String ensurePackage(String drl, String expected) {
+    String trimmed = drl.stripLeading();
+    if (!trimmed.startsWith("package ")) {
+        return "package " + expected + "\n\n" + drl;
+    }
+    return drl; // already has a package; make sure it's the same as header
+}
+
