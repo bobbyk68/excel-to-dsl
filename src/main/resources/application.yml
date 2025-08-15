@@ -1,0 +1,13 @@
+rules:
+  toggles:
+    path: src/main/resources/config/rule-toggles.json
+    build:
+      onStartup: true        # build/merge toggles from the disk .dslr/.dsl at startup
+  dsl:
+    root: rules/dsl          # classpath-relative root for .dsl
+  dslr:
+    root: rules              # classpath-relative root for .dslr
+  files:
+    onFilesystem: false      # set true if loading from outside classpath (absolute paths)
+  watch:
+    paths: src/main/resources/rules,src/main/resources/rules/dsl
