@@ -12,18 +12,20 @@ import java.util.stream.Collectors;
 
 public final class RuleToggles {
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    public List<String> globalDsl;  // e.g. ["rules/dsl/common.dsl", ...]
+    public List<String> globalDsl;
     public List<RuleToggle> rules;
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class RuleToggle {
-        public String id;       // e.g. "BR236"
-        public boolean enabled; // default false on first generation
+        public String id;       // exact rule header name: rule "..."
+        public String file;     // e.g. rules/BR675_rules.dslr
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public String dsl;      // e.g. rules/dsl/BR675_rules.dsl
+        public boolean enabled;
 
         public RuleToggle() {}
-        public RuleToggle(String id, boolean enabled) {
-            this.id = id;
-            this.enabled = enabled;
+        public RuleToggle(String id, String file, String dsl, boolean enabled) {
+            this.id = id; this.file = file; this.dsl = dsl; this.enabled = enabled;
         }
     }
 
@@ -34,7 +36,6 @@ public final class RuleToggles {
             throw new IllegalStateException("Failed to read toggles JSON: " + jsonPath, e);
         }
     }
-
     public static void save(Path jsonPath, RuleToggles toggles) {
         try {
             Files.createDirectories(jsonPath.getParent());
@@ -45,32 +46,26 @@ public final class RuleToggles {
             throw new IllegalStateException("Failed to write toggles JSON: " + jsonPath, e);
         }
     }
-
     private static ObjectMapper mapper() {
         var om = new ObjectMapper();
         om.enable(SerializationFeature.INDENT_OUTPUT);
         return om;
     }
 
-    /** Merge: keep existing enabled flags; add new IDs as disabled by default; drop IDs whose files disappeared. */
-    public static RuleToggles merge(RuleToggles existing, Set<String> discoveredIds, List<String> globalDsl) {
+    /** Preserve enabled flags by (id,file) pair; drop missing rules; add new rules disabled. */
+    public static RuleToggles merge(RuleToggles existing, List<RuleToggle> discovered, List<String> globalDsl) {
         var result = new RuleToggles();
         result.globalDsl = (globalDsl == null || globalDsl.isEmpty()) ? null : new ArrayList<>(globalDsl);
 
-        Map<String, Boolean> existingFlags = existing != null && existing.rules != null
-                ? existing.rules.stream().collect(Collectors.toMap(r -> r.id, r -> r.enabled, (a,b)->b, LinkedHashMap::new))
-                : new LinkedHashMap<>();
-
-        // Preserve flags for still-present IDs
-        List<RuleToggle> merged = new ArrayList<>();
-        for (String id : discoveredIds) {
-            boolean enabled = existingFlags.getOrDefault(id, false);
-            merged.add(new RuleToggle(id, enabled));
+        Map<String, Boolean> prev = new LinkedHashMap<>();
+        if (existing != null && existing.rules != null) {
+            for (var r : existing.rules) prev.put(key(r.id, r.file), r.enabled);
         }
+        for (var r : discovered) r.enabled = prev.getOrDefault(key(r.id, r.file), false);
 
-        // Sort by id for deterministic file
-        merged.sort(Comparator.comparing(rt -> rt.id));
-        result.rules = merged;
+        discovered.sort(Comparator.comparing((RuleToggle r) -> r.file).thenComparing(r -> r.id));
+        result.rules = discovered;
         return result;
     }
+    private static String key(String id, String file) { return id + "|" + file; }
 }

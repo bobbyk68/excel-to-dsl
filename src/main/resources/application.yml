@@ -11,3 +11,20 @@ rules:
     onFilesystem: false      # set true if loading from outside classpath (absolute paths)
   watch:
     paths: src/main/resources/rules,src/main/resources/rules/dsl
+
+rules:
+  main:
+    dsl: rules/dsl/main.dsl
+    dslr: rules/main.dslr
+  dsl:
+    root: rules/dsl
+  dslr:
+    root: rules
+  toggles:
+    path: src/main/resources/config/rule-toggles.json
+    build:
+      onStartup: true
+  files:
+    onFilesystem: false
+  watch:
+    paths: src/main/resources/rules,src/main/resources/rules/dsl,src/main/resources/config
