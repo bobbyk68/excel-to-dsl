@@ -47,3 +47,16 @@ private static String extractBrPrefix(String ruleName) {
     int underscore = ruleName.indexOf('_');
     return underscore > 0 ? ruleName.substring(0, underscore) : ruleName;
 }
+
+
+
+{
+        "dsl": [
+        { "lhs": "context is declaration", "rhs": "$vd : ValidateDeclaration()" }
+        ],
+        "dslrPrepend": [
+        "context is declaration"
+        ],
+        "dslrAppend": [
+        ]
+        }
