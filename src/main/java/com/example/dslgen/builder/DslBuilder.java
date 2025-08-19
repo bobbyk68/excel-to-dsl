@@ -1,72 +1,78 @@
-package com.example.dslgen.builder;
+package uk.gov.h.builder;
 
-import com.example.dslgen.RuleRow;
-import com.example.dslgen.pattern.PatternMatcher;
+import uk.gov.h.dsl.ThenTemplate;
+import uk.gov.h.dsl.ThenTemplateLoader;
+import uk.gov.h.model.RuleRow;
 
+import java.nio.file.Path;
 import java.util.*;
 
+/**
+ * Builds the shared DSL dictionary and per-rule DSLR, with NO hardcoded THENs.
+ * - DSL: de-duped [when] (and optional [then] if a matcher THEN exists)
+ * - DSLR: WHEN uses lhsRendered; THEN = (matcher THEN rhsRendered) + (template lines), de-duped, stable order
+ */
 public class DslBuilder {
 
-    public record ParsedDsl(String rawLhs, String renderedLhs, String rawRhs, String renderedRhs) {}
+    // Keep raw (with {val}) for DSL; rendered (substituted) for DSLR
+    public record ParsedDsl(String lhsRaw, String lhsRendered, String rhsRaw, String rhsRendered) {}
 
     public static class Result {
         public final List<String> dslLines = new ArrayList<>();
         public final List<String> dslrLines = new ArrayList<>();
     }
 
-    private final PatternMatcher whenMatcher;
-    private final PatternMatcher thenMatcher;
+    private final Path thenTemplatePath;
 
-    public DslBuilder(PatternMatcher whenMatcher, PatternMatcher thenMatcher) {
-        this.whenMatcher = whenMatcher;
-        this.thenMatcher = thenMatcher;
-    }
+    public DslBuilder() { this(null); }
+    public DslBuilder(Path thenTemplatePath) { this.thenTemplatePath = thenTemplatePath; }
 
-    public Result build(List<RuleRow> rules) {
+    public Result buildRule(RuleRow row,
+                            List<ParsedDsl> whenParts,
+                            ParsedDsl matchedThen /* may be null */) {
         Result result = new Result();
-        Set<String> seenDslConditions = new HashSet<>();
 
-        for (RuleRow row : rules) {
-            List<String> conditionKeys = new ArrayList<>();
-
-            for (String cond : row.getConditions()) {
-                ParsedDsl parsed = whenMatcher.tryMatch(cond);
-                if (parsed != null) {
-                    // ✅ Only add to DSL file once
-                    if (seenDslConditions.add(parsed.rawLhs())) {
-                        result.dslLines.add("[when] " + parsed.rawLhs() + " = \"" + parsed.rawRhs() + "\"");
-                    }
-                    // ✅ Always collect for DSLR
-                    conditionKeys.add(parsed.renderedLhs());
-                } else {
-                    System.out.println("⚠️ Unmatched WHEN condition: " + cond);
-                }
-            }
-
-            // ✅ Then clause
-            ParsedDsl thenParsed = thenMatcher != null ? thenMatcher.tryMatch(row.getAction()) : null;
-            if (thenParsed != null && seenDslConditions.add(thenParsed.rawLhs())) {
-                result.dslLines.add("[then] " + thenParsed.rawLhs() + " = " + thenParsed.rawRhs());
-            }
-
-            // ✅ DSLR Generation
-            result.dslrLines.add("rule \"" + row.getName() + "\"");
-            result.dslrLines.add("when");
-            result.dslrLines.add("    the ProcedureCategory is " + row.getProcedureCategory());
-            result.dslrLines.add("    and the DeclarationType is " + row.getDeclarationType());
-            for (String key : conditionKeys) {
-                result.dslrLines.add("    and " + key);
-            }
-            result.dslrLines.add("then");
-
-            if (thenParsed != null) {
-                result.dslrLines.add("    " + thenParsed.renderedRhs() + ";");
-            } else {
-                result.dslrLines.add("    System.out.println(\"ERROR: " + row.getErrorCode() + "\");");
-            }
-
-            result.dslrLines.add("end\n");
+        // --- DSL dictionary (WHEN only; de-dupe by LHS raw) ---
+        Map<String, String> whenDict = new LinkedHashMap<>();
+        for (ParsedDsl p : whenParts) {
+            whenDict.putIfAbsent(p.lhsRaw(), p.rhsRaw());
         }
+        for (var e : whenDict.entrySet()) {
+            result.dslLines.add("[when] " + e.getKey() + " = " + e.getValue());
+        }
+
+        // Optional: expose THEN pattern in the DSL dictionary as well (still not hardcoded)
+        if (matchedThen != null) {
+            result.dslLines.add("[then] " + matchedThen.lhsRaw() + " = " + matchedThen.rhsRaw());
+        }
+
+        // --- DSLR assembly ---
+        result.dslrLines.add("rule \"" + row.getName() + "\"");
+        result.dslrLines.add("when");
+        for (ParsedDsl p : whenParts) {
+            // If you have a DRL-emitter, call it here instead of using English lhsRendered
+            result.dslrLines.add("    " + p.lhsRendered());
+        }
+        result.dslrLines.add("then");
+
+        // Combine matcher THEN + template THEN (de-duped, stable order)
+        LinkedHashSet<String> thenLines = new LinkedHashSet<>();
+        if (matchedThen != null && matchedThen.rhsRendered() != null && !matchedThen.rhsRendered().isBlank()) {
+            thenLines.add(matchedThen.rhsRendered());
+        }
+
+        ThenTemplate tmpl = ThenTemplateLoader.load(
+                thenTemplatePath != null ? thenTemplatePath : Path.of("config/then-template.json")
+        );
+        for (String rendered : tmpl.render(row)) {
+            if (rendered != null && !rendered.isBlank()) thenLines.add(rendered);
+        }
+
+        for (String line : thenLines) {
+            result.dslrLines.add("    " + line + ";");
+        }
+        result.dslrLines.add("end");
+        result.dslrLines.add(""); // spacer between rules
 
         return result;
     }

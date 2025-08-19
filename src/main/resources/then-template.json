@@ -1,0 +1,6 @@
+{
+  "then": [
+    "results.add(\"ERROR: {errorCode}\")",
+    "audit.log(\"Rule={name}, Cat={procedureCategory}, Type={declarationType}\")"
+  ]
+}
