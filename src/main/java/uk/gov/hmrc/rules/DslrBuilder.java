@@ -9,14 +9,17 @@ import java.nio.file.Path;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+// v13
+package uk.gov.hmrc.rules.build;
 
-/**
- * DslrBuilder v12
- * - RuleRow.procCats and decTypes are now Strings (not lists)
- * - Expands decTypes == "ALL" -> A,D,Y,Z,C,J,F (for ${decTypesExpanded})
- * - Keeps raw strings available as-is for ${procCats} and ${decTypes}
- * - Stages each condition line into br.dsl if missing in main.dsl
- */
+import uk.gov.hmrc.rules.templates.WhenTemplates;
+import uk.gov.hmrc.rules.templates.ThenTemplates;
+
+import java.nio.file.Path;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
 public class DslrBuilder {
     private static final List<String> ALL_DECL_TYPES = List.of("A","D","Y","Z","C","J","F");
 
@@ -45,32 +48,51 @@ public class DslrBuilder {
         for (RuleRow r : ordered) {
             validateRow(r);
 
-            // 1) Stage each condition into br.dsl if missing in main.dsl
+            // stage conditions to br.dsl
             for (var c : r.conditions()) {
                 var line = normalizeCondition(c);
                 ensureLhsExistsOrStage(line, mainDsl, brDsl, stagedCache);
             }
 
-            // 2) Prepare bindings
-            var effBindings = effectiveBindings(r);
+            // bindings
+            var bindings = effectiveBindings(r);
 
-            // 3) Render WHEN/THEN via templates
-            var when = whenTemplates.render(nonNull(r.whenTemplateId()), effBindings);
-            var then = thenTemplates.render(nonNull(r.thenTemplateId()), effBindings);
+            // JSON-driven extras
+            var whenPre = whenTemplates.prependLines(r.whenTemplateId(), bindings);
+            var whenBody = whenTemplates.render(r.whenTemplateId(), bindings);
+            var whenPost = whenTemplates.appendLines(r.whenTemplateId(), bindings);
 
-            // 4) Emit rule (include original source as comment)
+            var thenPre = thenTemplates.prependLines(r.thenTemplateId(), bindings);
+            var thenBody = thenTemplates.render(r.thenTemplateId(), bindings);
+            var thenPost = thenTemplates.appendLines(r.thenTemplateId(), bindings);
+
+            // emit
             if (!isBlank(r.original())) {
                 dslr.append("// source: ").append(r.original().replace("\n", " ")).append("\n");
             }
-            dslr.append("""
-                rule "%s"
-                when
-                %s
-                then
-                %s
-                end
+            dslr.append("rule \"%s\"\n".formatted(r.ruleName()));
 
-                """.formatted(r.ruleName(), when, then));
+            // WHEN prepend (between rule header and 'when')
+            for (var ln : whenPre) dslr.append("    ").append(ln).append("\n");
+
+            dslr.append("when\n");
+            dslr.append("        ").append(whenBody).append("\n");
+
+            // WHEN append (rarely used)
+            for (var ln : whenPost) dslr.append("    ").append(ln).append("\n");
+
+            dslr.append("then\n");
+
+            // THEN prepend (right after 'then')
+            for (var ln : thenPre) dslr.append("        ").append(ln).append("\n");
+
+            // THEN body
+            dslr.append("        ").append(thenBody).append("\n");
+
+            // THEN append (before 'end')
+            for (var ln : thenPost) dslr.append("        ").append(ln).append("\n");
+
+            dslr.append("end\n\n");
         }
 
         FileIO.writeString(outDslr, dslr.toString());
@@ -78,55 +100,33 @@ public class DslrBuilder {
 
     private Map<String, Object> effectiveBindings(RuleRow r) {
         var map = new LinkedHashMap<>(Optional.ofNullable(r.bindings()).orElseGet(LinkedHashMap::new));
-
-        // Always provide raw strings
         map.putIfAbsent("procCats", nonNull(r.procCats()).trim());
         map.putIfAbsent("decTypes", nonNull(r.decTypes()).trim());
-
-        // Provide expanded dec types as a comma-joined string (for convenience)
-        var decExpanded = expandDecTypesToString(r.decTypes());
-        map.putIfAbsent("decTypesExpanded", decExpanded);
-
-        // Auto-inject error code if not present
-        if (!map.containsKey("code") && !isBlank(r.errorCode())) {
-            map.put("code", r.errorCode());
-        }
-
-        // ${conditions} (newline-joined + indent for WHEN body)
+        map.putIfAbsent("decTypesExpanded", expandDecTypesToString(r.decTypes()));
+        if (!map.containsKey("code") && !isBlank(r.errorCode())) map.put("code", r.errorCode());
         var joinedConds = String.join("\n        ", r.conditions());
         map.putIfAbsent("conditions", joinedConds);
-
         return map;
     }
 
     private String expandDecTypesToString(String raw) {
         if (raw == null) return "";
-        if ("ALL".equalsIgnoreCase(raw.trim())) {
-            return String.join(",", ALL_DECL_TYPES);
-        }
-        // normalize commas and spaces
-        var parts = Arrays.stream(raw.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .toList();
+        if ("ALL".equalsIgnoreCase(raw.trim())) return String.join(",", ALL_DECL_TYPES);
+        var parts = Arrays.stream(raw.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toList();
         return String.join(",", parts);
     }
 
-    private String normalizeCondition(String c) {
-        return c == null ? "" : c.trim().replaceAll("\\s+", " ");
-    }
-
+    private String normalizeCondition(String c) { return c == null ? "" : c.trim().replaceAll("\\s+", " "); }
     private void writeHeader(StringBuilder sb, int count) {
         var ts = ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         sb.append("""
             // --------------------------------------------------------------------
-            // Generated by DslrBuilder v12 at %s
+            // Generated by DslrBuilder v13 at %s
             // Rules: %d
             // --------------------------------------------------------------------
 
             """.formatted(ts, count));
     }
-
     private void validateRow(RuleRow r) {
         if (r == null) throw new IllegalArgumentException("RuleRow is null");
         if (isBlank(r.ruleName())) throw new IllegalArgumentException("ruleName is blank");
@@ -136,7 +136,6 @@ public class DslrBuilder {
         if (isBlank(r.whenTemplateId())) throw new IllegalArgumentException("whenTemplateId is blank");
         if (isBlank(r.thenTemplateId())) throw new IllegalArgumentException("thenTemplateId is blank");
     }
-
     private boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
     private String nonNull(String s) { return s == null ? "" : s; }
 
