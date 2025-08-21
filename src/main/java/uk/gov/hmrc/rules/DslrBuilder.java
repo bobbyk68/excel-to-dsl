@@ -1,4 +1,5 @@
 // v10
+// v12
 package uk.gov.hmrc.rules.build;
 
 import uk.gov.hmrc.rules.templates.WhenTemplates;
@@ -9,7 +10,16 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
+/**
+ * DslrBuilder v12
+ * - RuleRow.procCats and decTypes are now Strings (not lists)
+ * - Expands decTypes == "ALL" -> A,D,Y,Z,C,J,F (for ${decTypesExpanded})
+ * - Keeps raw strings available as-is for ${procCats} and ${decTypes}
+ * - Stages each condition line into br.dsl if missing in main.dsl
+ */
 public class DslrBuilder {
+    private static final List<String> ALL_DECL_TYPES = List.of("A","D","Y","Z","C","J","F");
+
     private final WhenTemplates whenTemplates;
     private final ThenTemplates thenTemplates;
 
@@ -35,20 +45,20 @@ public class DslrBuilder {
         for (RuleRow r : ordered) {
             validateRow(r);
 
-            // 1) Determine the LHS key to ensure in DSL dictionaries
-            var lhsKey = effectiveLhsKey(r);
+            // 1) Stage each condition into br.dsl if missing in main.dsl
+            for (var c : r.conditions()) {
+                var line = normalizeCondition(c);
+                ensureLhsExistsOrStage(line, mainDsl, brDsl, stagedCache);
+            }
 
-            // 2) Stage missing LHS into br.dsl if not present in main.dsl (idempotent)
-            ensureLhsExistsOrStage(lhsKey, mainDsl, brDsl, stagedCache);
+            // 2) Prepare bindings
+            var effBindings = effectiveBindings(r);
 
-            // 3) Prepare bindings (auto-inject errorCode as "code" if absent)
-            var bindings = withDefaultCodeBinding(r.bindings(), r.errorCode());
+            // 3) Render WHEN/THEN via templates
+            var when = whenTemplates.render(nonNull(r.whenTemplateId()), effBindings);
+            var then = thenTemplates.render(nonNull(r.thenTemplateId()), effBindings);
 
-            // 4) Render WHEN/THEN from templates
-            var when = whenTemplates.render(r.whenTemplateId(), bindings);
-            var then = thenTemplates.render(r.thenTemplateId(), bindings);
-
-            // 5) Emit rule (include original source as comment for traceability)
+            // 4) Emit rule (include original source as comment)
             if (!isBlank(r.original())) {
                 dslr.append("// source: ").append(r.original().replace("\n", " ")).append("\n");
             }
@@ -66,32 +76,51 @@ public class DslrBuilder {
         FileIO.writeString(outDslr, dslr.toString());
     }
 
-    private Map<String,Object> withDefaultCodeBinding(Map<String,Object> base, String errorCode) {
-        var map = new LinkedHashMap<>(Objects.requireNonNull(base, "bindings"));
-        if (!map.containsKey("code") && !isBlank(errorCode)) {
-            map.put("code", errorCode);
+    private Map<String, Object> effectiveBindings(RuleRow r) {
+        var map = new LinkedHashMap<>(Optional.ofNullable(r.bindings()).orElseGet(LinkedHashMap::new));
+
+        // Always provide raw strings
+        map.putIfAbsent("procCats", nonNull(r.procCats()).trim());
+        map.putIfAbsent("decTypes", nonNull(r.decTypes()).trim());
+
+        // Provide expanded dec types as a comma-joined string (for convenience)
+        var decExpanded = expandDecTypesToString(r.decTypes());
+        map.putIfAbsent("decTypesExpanded", decExpanded);
+
+        // Auto-inject error code if not present
+        if (!map.containsKey("code") && !isBlank(r.errorCode())) {
+            map.put("code", r.errorCode());
         }
+
+        // ${conditions} (newline-joined + indent for WHEN body)
+        var joinedConds = String.join("\n        ", r.conditions());
+        map.putIfAbsent("conditions", joinedConds);
+
         return map;
     }
 
-    private String effectiveLhsKey(RuleRow r) {
-        if (!isBlank(r.lhsKey())) return r.lhsKey().trim();
-        if (!isBlank(r.conditions())) return normalizeConditions(r.conditions());
-        throw new IllegalArgumentException("Missing lhsKey and conditions for rule: " + r.ruleName());
+    private String expandDecTypesToString(String raw) {
+        if (raw == null) return "";
+        if ("ALL".equalsIgnoreCase(raw.trim())) {
+            return String.join(",", ALL_DECL_TYPES);
+        }
+        // normalize commas and spaces
+        var parts = Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .toList();
+        return String.join(",", parts);
     }
 
-    // Minimal normalization so the staged line is stable and readable
-    private String normalizeConditions(String c) {
-        var s = c.trim().replaceAll("\\s+", " ");
-        // If your main.dsl expects a specific prefix/syntax, adapt here:
-        return s;
+    private String normalizeCondition(String c) {
+        return c == null ? "" : c.trim().replaceAll("\\s+", " ");
     }
 
     private void writeHeader(StringBuilder sb, int count) {
         var ts = ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         sb.append("""
             // --------------------------------------------------------------------
-            // Generated by DslrBuilder v10 at %s
+            // Generated by DslrBuilder v12 at %s
             // Rules: %d
             // --------------------------------------------------------------------
 
@@ -101,19 +130,18 @@ public class DslrBuilder {
     private void validateRow(RuleRow r) {
         if (r == null) throw new IllegalArgumentException("RuleRow is null");
         if (isBlank(r.ruleName())) throw new IllegalArgumentException("ruleName is blank");
+        if (r.conditions() == null || r.conditions().isEmpty()) {
+            throw new IllegalArgumentException("conditions list is null/empty for rule: " + r.ruleName());
+        }
         if (isBlank(r.whenTemplateId())) throw new IllegalArgumentException("whenTemplateId is blank");
         if (isBlank(r.thenTemplateId())) throw new IllegalArgumentException("thenTemplateId is blank");
-        if (r.bindings() == null) throw new IllegalArgumentException("bindings is null");
-        // lhsKey may be null if conditions is present (we derive); ensure at least one is provided
-        if (isBlank(r.lhsKey()) && isBlank(r.conditions())) {
-            throw new IllegalArgumentException("Both lhsKey and conditions are blank for rule: " + r.ruleName());
-        }
     }
 
     private boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
+    private String nonNull(String s) { return s == null ? "" : s; }
 
-    private void ensureLhsExistsOrStage(String lhsKey, Path mainDsl, Path brDsl, Set<String> stagedCache) {
-        var normalized = lhsKey.trim();
+    private void ensureLhsExistsOrStage(String lhsLine, Path mainDsl, Path brDsl, Set<String> stagedCache) {
+        var normalized = lhsLine.trim();
         if (normalized.isEmpty()) return;
         if (FileIO.fileContainsLine(mainDsl, normalized)) return;
         if (!stagedCache.contains(normalized)) {
