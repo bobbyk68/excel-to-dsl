@@ -1,0 +1,16 @@
+{
+  "FlagError": { "code": "results.addError(\"${code}\", \"${message}\");" },
+  "SetFlag":   { "code": "license.setFlag(true);" }
+}
+
+
+var when = WhenTemplates.load(Path.of("config/when.json"));
+var then = ThenTemplates.load(Path.of("config/then.json"));
+var builder = new DslrBuilder(when, then);
+
+builder.buildDslr(
+rows,
+Path.of("rules/main.dsl"),
+Path.of("rules/br.dsl"),
+Path.of("rules/generated/all.dslr")
+);
