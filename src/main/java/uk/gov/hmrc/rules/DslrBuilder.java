@@ -1,5 +1,5 @@
-// v8
-package uk.gov.hmrc.rules;
+// v10
+package uk.gov.hmrc.rules.build;
 
 import uk.gov.hmrc.rules.templates.WhenTemplates;
 import uk.gov.hmrc.rules.templates.ThenTemplates;
@@ -9,60 +9,49 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
-/**
- * DslrBuilder v8
- * - Keeps original 2 params: WhenTemplates + ThenTemplates
- * - Idempotent LHS staging: only appends to br.dsl if missing in main.dsl AND not already staged
- * - Deterministic rule ordering (by ruleName) to avoid noisy diffs
- * - Defensive null/empty checks with clear messages
- * - Single pass file writes (string builder -> write once)
- */
 public class DslrBuilder {
-    private final WhenTemplates whenTemplates; // param 1
-    private final ThenTemplates thenTemplates; // param 2
+    private final WhenTemplates whenTemplates;
+    private final ThenTemplates thenTemplates;
 
     public DslrBuilder(WhenTemplates whenTemplates, ThenTemplates thenTemplates) {
         this.whenTemplates = Objects.requireNonNull(whenTemplates, "whenTemplates");
         this.thenTemplates = Objects.requireNonNull(thenTemplates, "thenTemplates");
     }
 
-    /**
-     * Build DSLR output and stage missing LHS entries.
-     *
-     * @param rows    parsed rows for rules
-     * @param mainDsl path to main.dsl (checked for existing LHS handles)
-     * @param brDsl   path to br.dsl (staging for missing LHS handles)
-     * @param outDslr path to generated .dslr file
-     */
     public void buildDslr(List<RuleRow> rows, Path mainDsl, Path brDsl, Path outDslr) {
-        if (rows == null || rows.isEmpty()) {
-            throw new IllegalArgumentException("rows must not be null/empty");
-        }
+        if (rows == null || rows.isEmpty()) throw new IllegalArgumentException("rows must not be null/empty");
         Objects.requireNonNull(mainDsl, "mainDsl");
         Objects.requireNonNull(brDsl, "brDsl");
         Objects.requireNonNull(outDslr, "outDslr");
 
-        // Sort to keep output stable between runs
         var ordered = new ArrayList<>(rows);
         ordered.sort(Comparator.comparing(RuleRow::ruleName, Comparator.nullsLast(String::compareTo)));
 
         var dslr = new StringBuilder();
         writeHeader(dslr, ordered.size());
 
-        // Preload existing staged lines to keep idempotent behavior
         var stagedCache = FileIO.fileReadAllLines(brDsl);
 
         for (RuleRow r : ordered) {
             validateRow(r);
 
-            // Ensure LHS exists in main.dsl; if not, stage to br.dsl (idempotently)
-            ensureLhsExistsOrStage(r.lhsKey(), mainDsl, brDsl, stagedCache);
+            // 1) Determine the LHS key to ensure in DSL dictionaries
+            var lhsKey = effectiveLhsKey(r);
 
-            // Render WHEN/THEN from templates with bindings
-            var when = whenTemplates.render(r.whenTemplateId(), r.bindings());
-            var then = thenTemplates.render(r.thenTemplateId(), r.bindings());
+            // 2) Stage missing LHS into br.dsl if not present in main.dsl (idempotent)
+            ensureLhsExistsOrStage(lhsKey, mainDsl, brDsl, stagedCache);
 
-            // Emit rule block
+            // 3) Prepare bindings (auto-inject errorCode as "code" if absent)
+            var bindings = withDefaultCodeBinding(r.bindings(), r.errorCode());
+
+            // 4) Render WHEN/THEN from templates
+            var when = whenTemplates.render(r.whenTemplateId(), bindings);
+            var then = thenTemplates.render(r.thenTemplateId(), bindings);
+
+            // 5) Emit rule (include original source as comment for traceability)
+            if (!isBlank(r.original())) {
+                dslr.append("// source: ").append(r.original().replace("\n", " ")).append("\n");
+            }
             dslr.append("""
                 rule "%s"
                 when
@@ -77,11 +66,32 @@ public class DslrBuilder {
         FileIO.writeString(outDslr, dslr.toString());
     }
 
+    private Map<String,Object> withDefaultCodeBinding(Map<String,Object> base, String errorCode) {
+        var map = new LinkedHashMap<>(Objects.requireNonNull(base, "bindings"));
+        if (!map.containsKey("code") && !isBlank(errorCode)) {
+            map.put("code", errorCode);
+        }
+        return map;
+    }
+
+    private String effectiveLhsKey(RuleRow r) {
+        if (!isBlank(r.lhsKey())) return r.lhsKey().trim();
+        if (!isBlank(r.conditions())) return normalizeConditions(r.conditions());
+        throw new IllegalArgumentException("Missing lhsKey and conditions for rule: " + r.ruleName());
+    }
+
+    // Minimal normalization so the staged line is stable and readable
+    private String normalizeConditions(String c) {
+        var s = c.trim().replaceAll("\\s+", " ");
+        // If your main.dsl expects a specific prefix/syntax, adapt here:
+        return s;
+    }
+
     private void writeHeader(StringBuilder sb, int count) {
         var ts = ZonedDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
         sb.append("""
             // --------------------------------------------------------------------
-            // Generated by DslrBuilder v8 at %s
+            // Generated by DslrBuilder v10 at %s
             // Rules: %d
             // --------------------------------------------------------------------
 
@@ -91,25 +101,21 @@ public class DslrBuilder {
     private void validateRow(RuleRow r) {
         if (r == null) throw new IllegalArgumentException("RuleRow is null");
         if (isBlank(r.ruleName())) throw new IllegalArgumentException("ruleName is blank");
-        if (isBlank(r.lhsKey())) throw new IllegalArgumentException("lhsKey is blank");
         if (isBlank(r.whenTemplateId())) throw new IllegalArgumentException("whenTemplateId is blank");
         if (isBlank(r.thenTemplateId())) throw new IllegalArgumentException("thenTemplateId is blank");
         if (r.bindings() == null) throw new IllegalArgumentException("bindings is null");
+        // lhsKey may be null if conditions is present (we derive); ensure at least one is provided
+        if (isBlank(r.lhsKey()) && isBlank(r.conditions())) {
+            throw new IllegalArgumentException("Both lhsKey and conditions are blank for rule: " + r.ruleName());
+        }
     }
 
-    private boolean isBlank(String s) {
-        return s == null || s.trim().isEmpty();
-    }
+    private boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
 
-    /** Idempotent: checks main.dsl; if missing there and not already in br.dsl, appends once. */
     private void ensureLhsExistsOrStage(String lhsKey, Path mainDsl, Path brDsl, Set<String> stagedCache) {
         var normalized = lhsKey.trim();
         if (normalized.isEmpty()) return;
-
-        var existsInMain = FileIO.fileContainsLine(mainDsl, normalized);
-        if (existsInMain) return;
-
-        // Only append if not already staged in br.dsl (use exact trimmed match)
+        if (FileIO.fileContainsLine(mainDsl, normalized)) return;
         if (!stagedCache.contains(normalized)) {
             FileIO.appendLine(brDsl, normalized);
             stagedCache.add(normalized);
