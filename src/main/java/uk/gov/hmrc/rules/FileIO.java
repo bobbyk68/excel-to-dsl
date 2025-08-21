@@ -1,8 +1,11 @@
-package uk.gov.hmrc.rules;
+// v2
+package uk.gov.hmrc.rules.build;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.stream.Stream;
 
 final class FileIO {
@@ -32,6 +35,18 @@ final class FileIO {
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
             throw new RuntimeException("Write failed: " + file, e);
+        }
+    }
+
+    /** New in v2: read all non-blank, trimmed lines into an insertion-ordered Set. */
+    static Set<String> fileReadAllLines(Path file) {
+        if (!Files.exists(file)) return new LinkedHashSet<>();
+        try (var lines = Files.lines(file, StandardCharsets.UTF_8)) {
+            var set = new LinkedHashSet<String>();
+            lines.map(String::trim).filter(s -> !s.isEmpty()).forEach(set::add);
+            return set;
+        } catch (IOException e) {
+            throw new RuntimeException("Read failed: " + file, e);
         }
     }
 
