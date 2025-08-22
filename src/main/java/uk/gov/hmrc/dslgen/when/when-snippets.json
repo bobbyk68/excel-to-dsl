@@ -1,0 +1,47 @@
+{
+  "vars": ["DECL","CONS","ITEM","DOC"],
+  "snippets": [
+    {
+      "id": "decl",
+      "phrase": "Declaration Validation request declared with",
+      "provides": ["DECL"],
+      "requires": []
+    },
+    {
+      "id": "consFromDecl",
+      "phrase": "Consignment shipment from declaration",
+      "provides": ["CONS"],
+      "requires": ["DECL"]
+    },
+    {
+      "id": "itemFromCons",
+      "phrase": "Goods Item from shipment",
+      "provides": ["ITEM"],
+      "requires": ["CONS"]
+    },
+    {
+      "id": "docFromItem",
+      "phrase": "Additional Document from item",
+      "provides": ["DOC"],
+      "requires": ["ITEM"]
+    },
+    {
+      "id": "declTypeOneOf",
+      "phrase": "Declaration type oneof {decTypes}",
+      "provides": [],
+      "requires": ["DECL"]
+    },
+    {
+      "id": "procCatOneOf",
+      "phrase": "Declaration procedure category oneof {procCats}",
+      "provides": [],
+      "requires": ["DECL"]
+    },
+    {
+      "id": "authHolderCodeEq",
+      "phrase": "AuthorizationHolder.authorizationType.code must equal {val}",
+      "provides": [],
+      "requires": ["DOC"]
+    }
+  ]
+}
