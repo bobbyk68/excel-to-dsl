@@ -48,3 +48,22 @@ DslBuilder builder = new DslBuilder(
         Paths.get("src/main/resources/config/when-template.json"),
         Paths.get("src/main/resources/config/then-template.json")
 );
+
+
+DslBuilder builder = new DslBuilder(
+        new WhenPatternMatcher(),
+        new ThenPatternMatcher(),
+        Paths.get("src/main/resources/config/when-template.json"),
+        Paths.get("src/main/resources/config/then-template.json")
+);
+
+
+// WHEN
+if (whenMatcher instanceof WhenPatternMatcher w) {
+        whenPhrasesRaw.addAll(w.collectAll(row));
+        }
+
+// THEN
+        if (thenMatcher instanceof ThenPatternMatcher t) {
+        thenLines.addAll(t.collectAll(row));
+        }

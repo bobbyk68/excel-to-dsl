@@ -1,21 +1,34 @@
-package uk.gov.hmrc.dslgen.when;
+package uk.gov.hmrc.dslgen.then;
 
-import java.util.*;
+import uk.gov.hmrc.dslgen.RuleRow;
 
-public final class ThenPatternMatcher implements DslBuilder.PatternMatcher {
-    private final HybridPatternMatcher hybrid;
+import java.io.IOException;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
 
-    public ThenPatternMatcher(HybridPatternMatcher hybrid) {
-        this.hybrid = hybrid;
+public class ThenPatternMatcher {
+
+    public List<String> collectAll(RuleRow row) {
+        List<String> results = new ArrayList<>();
+
+        if (row.errorMessage() != null && !row.errorMessage().isBlank()) {
+            results.add("System.out.println(\"" + row.errorMessage() + "\");");
+        } else {
+            writeCatchall("[then]" + "Unknown RHS = Unknown RHS");
+            results.add("// Unmapped RHS");
+        }
+
+        return results;
     }
 
-    @Override
-    public Optional<String> tryMatch(DslBuilder.RuleRow row) {
-        return Optional.empty();
-    }
-
-    /** Use this in DslBuilder to get all THEN phrases for a row. */
-    public List<String> collectAll(DslBuilder.RuleRow row) {
-        return hybrid.thenPhrasesFor(row);
+    private void writeCatchall(String dslLine) {
+        try {
+            Path path = Path.of("target/catchall.dsl");
+            Files.writeString(path, dslLine + System.lineSeparator(),
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to write catchall.dsl", e);
+        }
     }
 }
