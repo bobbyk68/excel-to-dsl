@@ -2,9 +2,9 @@ package uk.gov.hmrc.dslgen.when;
 
 import uk.gov.hmrc.dslgen.RuleRow;
 import uk.gov.hmrc.dslgen.support.DslTemplateService;
-import uk.gov.hmrc.dslgen.support.DslTemplateService.TemplateDef;
 import uk.gov.hmrc.dslgen.support.DslTemplateService.TemplateMatch;
 import uk.gov.hmrc.dslgen.support.PrePostConfig;
+import uk.gov.hmrc.dslgen.support.Tokens;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -16,10 +16,9 @@ public class WhenPatternMatcher {
     private final PrePostConfig prepost = new PrePostConfig();
 
     public List<String> collectAll(RuleRow row) {
-        // 1) Collect matches from Excel phrases
+        // 1) collect matches
         List<TemplateMatch> matches = new ArrayList<>();
         List<String> rawUnmatched = new ArrayList<>();
-
         for (String candidate : row.whenCandidates()) {
             templates.matchWhen(candidate).ifPresentOrElse(
                     matches::add,
@@ -27,91 +26,109 @@ public class WhenPatternMatcher {
             );
         }
 
-        // 2) Auto-inject any missing prerequisites (recursively)
+        // 2) If you still want synthetic lines (comment out if you rely purely on prepend)
+        // injectDerivedFromRow(row, matches);
+
+        // 3) dependencies
         autoInjectMissingPrereqs(matches);
 
-        // 3) Order by requires (topological-ish)
+        // 4) order
         List<String> orderedDsl = orderByRequires(matches);
 
-        // 4) Emit + catch-all records for truly unmatched phrases
-        for (String raw : rawUnmatched) {
-            writeCatchall("[when] " + raw + " =");
-        }
+        // 5) hydrate ordered lines ({decTypes},{procCats},{param})
+        orderedDsl = orderedDsl.stream().map(s -> hydrateFromRow(s, row)).toList();
 
-        // 5) Wrap with pre/post and return
+        // 6) catch-all for truly unmatched
+        for (String raw : rawUnmatched) writeCatchall("[when] " + raw + " =");
+
+        // 7) NEW: hydrate pre/post as well
+        List<String> hydratedPre  = hydrateList(prepost.whenPrepend(), row);
+        List<String> hydratedPost = hydrateList(prepost.whenAppend(),  row);
+
+        // 8) emit
         List<String> out = new ArrayList<>();
-        out.addAll(prepost.whenPrepend());
+        out.addAll(hydratedPre);
         out.addAll(orderedDsl);
-        out.addAll(prepost.whenAppend());
+        out.addAll(hydratedPost);
         return out;
     }
 
-    /** Inject required parents by ID if they weren't matched from Excel. */
-    private void autoInjectMissingPrereqs(List<TemplateMatch> matches) {
-        // Build current id set
-        Set<String> have = matches.stream().map(TemplateMatch::id).collect(Collectors.toCollection(LinkedHashSet::new));
-        // Queue all missing required ids
-        Deque<String> need = new ArrayDeque<>();
-        matches.forEach(m -> m.requires().forEach(req -> { if (!have.contains(req)) need.add(req); }));
-
-        // BFS over requirements; inject as needed
-        while (!need.isEmpty()) {
-            String reqId = need.pollFirst();
-            if (have.contains(reqId)) continue;
-
-            Optional<TemplateDef> defOpt = templates.findWhenById(reqId);
-            if (defOpt.isEmpty()) {
-                // No such template in JSON; we cannot inject. Leave to leftovers.
-                continue;
-            }
-
-            TemplateDef def = defOpt.get();
-            matches.add(new TemplateMatch(def.id(), def.dsl(), def.requires()));
-            have.add(def.id());
-
-            // Ensure we also satisfy this injected node's own prereqs
-            for (String up : def.requires()) {
-                if (!have.contains(up)) need.addLast(up);
-            }
+    /** Derive matches from the row even without Excel triggers (optional). */
+    private void injectDerivedFromRow(RuleRow row, List<TemplateMatch> matches) {
+        boolean hasDeclType = matches.stream().anyMatch(m -> "DECL_TYPE".equals(m.id()));
+        if (!hasDeclType && row.declarationTypes() != null && !row.declarationTypes().isEmpty()) {
+            matches.add(new TemplateMatch(
+                    "DECL_TYPE",
+                    "$dec : Declaration( type in ({decTypes}) ) from $doc.declarations",
+                    List.of("DOC")
+            ));
+        }
+        boolean hasProcCat = matches.stream().anyMatch(m -> "PROC_CAT".equals(m.id()));
+        if (!hasProcCat && row.procedureCategories() != null && !row.procedureCategories().isEmpty()) {
+            matches.add(new TemplateMatch(
+                    "PROC_CAT",
+                    "$proc : Procedure( category in ({procCats}) ) from $doc.procedures",
+                    List.of("DOC")
+            ));
         }
     }
 
-    /** Simple dependency resolver: emit when all 'requires' are satisfied. */
+    private void autoInjectMissingPrereqs(List<TemplateMatch> matches) {
+        Set<String> have = matches.stream().map(TemplateMatch::id).collect(Collectors.toCollection(LinkedHashSet::new));
+        Deque<String> need = new ArrayDeque<>();
+        for (TemplateMatch m : matches) for (String req : m.requires()) if (!have.contains(req)) need.add(req);
+
+        while (!need.isEmpty()) {
+            String reqId = need.pollFirst();
+            if (have.contains(reqId)) continue;
+            var defOpt = templates.findWhenById(reqId);
+            if (defOpt.isEmpty()) continue;
+            var def = defOpt.get();
+            matches.add(new TemplateMatch(def.id(), def.dsl(), def.requires() == null ? List.of() : def.requires()));
+            have.add(def.id());
+            if (def.requires() != null) for (String up : def.requires()) if (!have.contains(up)) need.addLast(up);
+        }
+    }
+
     private List<String> orderByRequires(List<TemplateMatch> matches) {
         List<String> out = new ArrayList<>();
         Set<String> added = new HashSet<>();
-
-        boolean progress;
-        int guard = 0;
+        boolean progress; int guard = 0;
         do {
             progress = false;
             for (TemplateMatch m : matches) {
                 if (added.contains(m.id())) continue;
                 if (added.containsAll(m.requires())) {
-                    out.add(m.dsl());
-                    added.add(m.id());
-                    progress = true;
+                    out.add(m.dsl()); added.add(m.id()); progress = true;
                 }
             }
-            if (++guard > 1000) break; // safety guard
+            if (++guard > 1000) break;
         } while (progress);
+        for (TemplateMatch m : matches) if (!added.contains(m.id())) { out.add(m.dsl()); added.add(m.id()); }
+        return out;
+    }
 
-        // Leftovers (unmet/cyclic) — still emit so rules remain visible
-        for (TemplateMatch m : matches) {
-            if (!added.contains(m.id())) {
-                out.add(m.dsl());
-                added.add(m.id());
-            }
-        }
+    private String hydrateFromRow(String dsl, RuleRow row) {
+        if (dsl == null) return "";
+        String out = dsl;
+        if (out.contains("{decTypes}")) out = out.replace("{decTypes}", Tokens.quoteEachCsv(row.declarationTypes()));
+        if (out.contains("{procCats}")) out = out.replace("{procCats}", Tokens.quoteEachCsv(row.procedureCategories()));
+        if (out.contains("{param}"))    out = out.replace("{param}", row.param() == null ? "" : row.param());
+        return out;
+    }
+
+    private List<String> hydrateList(List<String> lines, RuleRow row) {
+        if (lines == null) return List.of();
+        List<String> out = new ArrayList<>(lines.size());
+        for (String line : lines) out.add(hydrateFromRow(line, row));
         return out;
     }
 
     private void writeCatchall(String dslLine) {
         try {
             Path path = Path.of("target/catchall.dsl");
-            Files.createDirectories(path.getParent());
-            Files.writeString(path, dslLine + System.lineSeparator(),
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            if (path.getParent() != null) Files.createDirectories(path.getParent());
+            Files.writeString(path, dslLine + System.lineSeparator(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
             throw new RuntimeException("Failed to write catchall.dsl", e);
         }
