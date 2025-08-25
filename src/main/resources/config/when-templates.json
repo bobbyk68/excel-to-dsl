@@ -1,0 +1,30 @@
+[
+  {
+    "id": "DOC",
+    "patterns": [
+      "^Document exists$"
+    ],
+    "dsl": "$doc : Document()"
+  },
+  {
+    "id": "DECL_TYPE",
+    "patterns": [
+      "^Declaration type oneof\\s+(.+)$",
+      "^Declaration type must be one of\\s+(.+)$"
+    ],
+    "dsl": "$dec : Declaration( type in ({1}) ) from $doc.declarations",
+    "requires": [
+      "DOC"
+    ]
+  },
+  {
+    "id": "AUTH_CODE",
+    "patterns": [
+      "^AuthorizationHolder\\.authorizationType\\.code must equal\\s+(.+)$"
+    ],
+    "dsl": "$auth : AuthorizationHolder( code == \"{1}\" ) from $doc.auths",
+    "requires": [
+      "DOC"
+    ]
+  }
+]
