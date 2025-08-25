@@ -1,7 +1,6 @@
-package uk.gov.hmrc.dslgen.when;
+package uk.gov.hmrc.dslgen;
 
 import uk.gov.hmrc.dslgen.when.WhenPatternMatcher;
-import uk.gov.hmrc.dslgen.then.ThenPatternMatcher;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -34,7 +33,7 @@ public class RuleGenerationRunner {
                 whenMatcher,
                 thenMatcher,
                 Path.of("src/main/resources/when-template.json"), // reserved for later
-                Path.of("src/main/resources/then-template.json")  // reserved for later
+                Path.of("src/main/resources/then-templates.json")  // reserved for later
         );
 
         // 3. Build DSL lines
