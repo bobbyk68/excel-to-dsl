@@ -1,4 +1,4 @@
-package uk.gov.hmrc.dslgen.dslgen.support;
+package uk.gov.hmrc.dslgen.support;
 
 import java.util.List;
 
