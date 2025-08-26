@@ -1,6 +1,7 @@
 package uk.gov.hmrc.dslgen.when;
 
 import uk.gov.hmrc.dslgen.RuleRow;
+import uk.gov.hmrc.dslgen.dict.DslValidator;
 import uk.gov.hmrc.dslgen.support.DslTemplateService;
 import uk.gov.hmrc.dslgen.support.DslTemplateService.TemplateMatch;
 import uk.gov.hmrc.dslgen.support.PrePostConfig;
@@ -14,6 +15,8 @@ import java.util.stream.Collectors;
 public class WhenPatternMatcher {
     private final DslTemplateService templates = new DslTemplateService();
     private final PrePostConfig prepost = new PrePostConfig();
+    // top of class
+    private final DslValidator validator;
 
     public List<String> collectAll(RuleRow row) {
         // 1) collect matches
