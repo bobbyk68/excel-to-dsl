@@ -1,5 +1,6 @@
 package uk.gov.hmrc.dslgen.support;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.InputStream;
@@ -7,89 +8,97 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Loads templates and performs regex matching + placeholder substitution.
+ * Now returns TemplateMatch with a LIST of DSL lines.
+ */
 public class DslTemplateService {
-    private final List<Entry> whenEntries;
-    private final List<Entry> thenEntries;
-
-    // NEW: keep an ID map for WHEN templates
-    private final Map<String, Entry> whenById;
+    private final List<TemplateDef> whenDefs;
+    private final List<TemplateDef> thenDefs;
+    private final Map<String, TemplateDef> whenById;
 
     public DslTemplateService() {
-        this.whenEntries = load("/config/when-templates.json");
-        this.thenEntries = load("/config/then-templates.json");
+        this.whenDefs = loadList("/config/when-templates.json");
+        this.thenDefs = loadList("/config/then-templates.json");
         this.whenById = new HashMap<>();
-        for (Entry e : whenEntries) whenById.put(e.id, e);
+        for (TemplateDef d : whenDefs) whenById.put(d.getId(), d);
     }
 
-    // NEW: expose lookup
-    public Optional<TemplateDef> findWhenById(String id) {
-        Entry e = whenById.get(id);
-        return e == null ? Optional.empty() : Optional.of(new TemplateDef(e.id, e.dsl, e.requires));
+    public Optional<TemplateMatch> matchWhen(String phrase) { return match(phrase, whenDefs); }
+    public Optional<TemplateMatch> matchThen(String phrase) { return match(phrase, thenDefs); }
+    public Optional<TemplateDef> findWhenById(String id) { return Optional.ofNullable(whenById.get(id)); }
+
+    private List<TemplateDef> loadList(String resource) {
+        try (InputStream in = getClass().getResourceAsStream(resource)) {
+            if (in == null) return List.of();
+            ObjectMapper mapper = new ObjectMapper();
+            return mapper.readValue(in, new TypeReference<List<TemplateDef>>() {});
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to load " + resource, e);
+        }
     }
 
-    // NEW: simple definition we can inject as a match
-    public record TemplateDef(String id, String dsl, List<String> requires) {}
-    
-    public Optional<TemplateMatch> matchWhen(String phrase) {
-        return match(phrase, whenEntries);
-    }
-    public Optional<TemplateMatch> matchThen(String phrase) {
-        return match(phrase, thenEntries);
-    }
-
-    private Optional<TemplateMatch> match(String phrase, List<Entry> entries) {
-        for (Entry e : entries) {
-            for (Pattern p : e.patterns) {
+    private Optional<TemplateMatch> match(String phrase, List<TemplateDef> defs) {
+        for (TemplateDef d : defs) {
+            List<String> regexes = d.getPatterns();
+            if (regexes == null) continue;
+            for (Pattern p : compile(regexes)) {
                 Matcher m = p.matcher(phrase);
                 if (m.matches()) {
-                    String out = e.dsl;
-                    for (int i = 1; i <= m.groupCount(); i++) {
-                        out = out.replace("{" + i + "}", m.group(i));
-                    }
-                    return Optional.of(new TemplateMatch(e.id, out, e.requires));
+                    // Substitute across all effective DSL lines
+                    List<String> substituted = substituteAll(d.effectiveDslLines(), m);
+                    List<String> requires = d.getRequires() == null ? List.of() : d.getRequires();
+                    return Optional.of(new TemplateMatch(d.getId(), substituted, requires));
                 }
             }
         }
         return Optional.empty();
     }
 
-    private List<Entry> load(String resourcePath) {
-        try (InputStream in = getClass().getResourceAsStream(resourcePath)) {
-            if (in == null) return List.of();
-            var mapper = new ObjectMapper();
-            @SuppressWarnings("unchecked")
-            List<Map<String,Object>> list = mapper.readValue(in, List.class);
-            List<Entry> out = new ArrayList<>();
-            for (Map<String,Object> m : list) {
-                @SuppressWarnings("unchecked")
-                List<String> patterns = (List<String>) m.getOrDefault("patterns", List.of());
-                String dsl = String.valueOf(m.get("dsl"));
-                List<String> requires = (List<String>) m.getOrDefault("requires", List.of());
-                List<Pattern> compiled = new ArrayList<>();
-                for (String s : patterns) compiled.add(Pattern.compile(s, Pattern.CASE_INSENSITIVE));
-                out.add(new Entry(
-                        (String)m.getOrDefault("id",""),
-                        compiled,
-                        dsl,
-                        requires
-                ));
+    private List<Pattern> compile(List<String> regexes) {
+        List<Pattern> list = new ArrayList<>();
+        for (String r : regexes) list.add(Pattern.compile(r, Pattern.CASE_INSENSITIVE));
+        return list;
+    }
+
+    /** Substitute {1},{2} and named groups {name} across all lines. */
+    private List<String> substituteAll(List<String> lines, Matcher m) {
+        List<String> out = new ArrayList<>(lines.size());
+        for (String line : lines) out.add(substitute(line, m));
+        return out;
+    }
+
+    private String substitute(String template, Matcher m) {
+        if (template == null) return "";
+        String out = template;
+
+        // numbered groups
+        for (int i = 1; i <= m.groupCount(); i++) {
+            String g = m.group(i);
+            if (g != null) out = out.replace("{" + i + "}", g);
+        }
+
+        // named groups
+        java.util.regex.Matcher tokenMatcher = Pattern
+                .compile("\\{([A-Za-z_][A-Za-z0-9_]*)\\}")
+                .matcher(out);
+
+        StringBuffer sb = new StringBuffer();
+        while (tokenMatcher.find()) {
+            String name = tokenMatcher.group(1);
+            String replacement;
+            try {
+                String g = m.group(name);
+                replacement = (g != null) ? g : "{" + name + "}";
+            } catch (IllegalArgumentException ex) {
+                replacement = "{" + name + "}";
             }
-            return out;
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to load " + resourcePath, e);
+            tokenMatcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(replacement));
         }
+        tokenMatcher.appendTail(sb);
+        return sb.toString();
     }
 
-    public record TemplateMatch(String id, String dsl, List<String> requires) {}
-
-    private static final class Entry {
-        final String id;
-        final List<Pattern> patterns;
-        final String dsl;
-        final List<String> requires;
-        Entry(String id, List<Pattern> patterns, String dsl, List<String> requires) {
-            this.id=id; this.patterns=patterns; this.dsl=dsl; this.requires=requires;
-        }
-    }
-
+    /** Carries id + multiple lines + requires. */
+    public record TemplateMatch(String id, List<String> dslLines, List<String> requires) {}
 }

@@ -26,26 +26,22 @@ public class WhenPatternMatcher {
             );
         }
 
-        // 2) If you still want synthetic lines (comment out if you rely purely on prepend)
-        // injectDerivedFromRow(row, matches);
-
-        // 3) dependencies
+        // 2) dependencies
         autoInjectMissingPrereqs(matches);
 
-        // 4) order
+        // 3) order + flatten lines
         List<String> orderedDsl = orderByRequires(matches);
 
-        // 5) hydrate ordered lines ({decTypes},{procCats},{param})
+        // 4) hydrate row tokens on WHEN lines
         orderedDsl = orderedDsl.stream().map(s -> hydrateFromRow(s, row)).toList();
 
-        // 6) catch-all for truly unmatched
+        // 5) catch-all
         for (String raw : rawUnmatched) writeCatchall("[when] " + raw + " =");
 
-        // 7) NEW: hydrate pre/post as well
+        // 6) hydrate pre/post and emit
         List<String> hydratedPre  = hydrateList(prepost.whenPrepend(), row);
         List<String> hydratedPost = hydrateList(prepost.whenAppend(),  row);
 
-        // 8) emit
         List<String> out = new ArrayList<>();
         out.addAll(hydratedPre);
         out.addAll(orderedDsl);
@@ -53,26 +49,7 @@ public class WhenPatternMatcher {
         return out;
     }
 
-    /** Derive matches from the row even without Excel triggers (optional). */
-    private void injectDerivedFromRow(RuleRow row, List<TemplateMatch> matches) {
-        boolean hasDeclType = matches.stream().anyMatch(m -> "DECL_TYPE".equals(m.id()));
-        if (!hasDeclType && row.declarationTypes() != null && !row.declarationTypes().isEmpty()) {
-            matches.add(new TemplateMatch(
-                    "DECL_TYPE",
-                    "$dec : Declaration( type in ({decTypes}) ) from $doc.declarations",
-                    List.of("DOC")
-            ));
-        }
-        boolean hasProcCat = matches.stream().anyMatch(m -> "PROC_CAT".equals(m.id()));
-        if (!hasProcCat && row.procedureCategories() != null && !row.procedureCategories().isEmpty()) {
-            matches.add(new TemplateMatch(
-                    "PROC_CAT",
-                    "$proc : Procedure( category in ({procCats}) ) from $doc.procedures",
-                    List.of("DOC")
-            ));
-        }
-    }
-
+    /** Auto-inject parents referenced by 'requires' if missing. */
     private void autoInjectMissingPrereqs(List<TemplateMatch> matches) {
         Set<String> have = matches.stream().map(TemplateMatch::id).collect(Collectors.toCollection(LinkedHashSet::new));
         Deque<String> need = new ArrayDeque<>();
@@ -83,37 +60,48 @@ public class WhenPatternMatcher {
             if (have.contains(reqId)) continue;
             var defOpt = templates.findWhenById(reqId);
             if (defOpt.isEmpty()) continue;
+
             var def = defOpt.get();
-            matches.add(new TemplateMatch(def.id(), def.dsl(), def.requires() == null ? List.of() : def.requires()));
-            have.add(def.id());
-            if (def.requires() != null) for (String up : def.requires()) if (!have.contains(up)) need.addLast(up);
+            // No regex match here -> take effective lines as-is (tokens hydrated later)
+            matches.add(new TemplateMatch(
+                    def.getId(),
+                    def.effectiveDslLines(),
+                    def.getRequires() == null ? List.of() : def.getRequires()
+            ));
+            have.add(def.getId());
+
+            if (def.getRequires() != null) {
+                for (String up : def.getRequires()) if (!have.contains(up)) need.addLast(up);
+            }
         }
     }
 
+    /** Order by requirements; emit ALL lines of each match when ready. */
     private List<String> orderByRequires(List<TemplateMatch> matches) {
         List<String> out = new ArrayList<>();
         Set<String> added = new HashSet<>();
         boolean progress; int guard = 0;
+
         do {
             progress = false;
             for (TemplateMatch m : matches) {
                 if (added.contains(m.id())) continue;
                 if (added.containsAll(m.requires())) {
-                    out.add(m.dsl()); added.add(m.id()); progress = true;
+                    out.addAll(m.dslLines());
+                    added.add(m.id());
+                    progress = true;
                 }
             }
             if (++guard > 1000) break;
         } while (progress);
-        for (TemplateMatch m : matches) if (!added.contains(m.id())) { out.add(m.dsl()); added.add(m.id()); }
-        return out;
-    }
 
-    private String hydrateFromRow(String dsl, RuleRow row) {
-        if (dsl == null) return "";
-        String out = dsl;
-        if (out.contains("{decTypes}")) out = out.replace("{decTypes}", Tokens.quoteEachCsv(row.declarationTypes()));
-        if (out.contains("{procCats}")) out = out.replace("{procCats}", Tokens.quoteEachCsv(row.procedureCategories()));
-        if (out.contains("{param}"))    out = out.replace("{param}", row.param() == null ? "" : row.param());
+        // Emit any leftovers (cycles / unresolved deps)
+        for (TemplateMatch m : matches) {
+            if (!added.contains(m.id())) {
+                out.addAll(m.dslLines());
+                added.add(m.id());
+            }
+        }
         return out;
     }
 
@@ -124,11 +112,24 @@ public class WhenPatternMatcher {
         return out;
     }
 
+    private String hydrateFromRow(String dsl, RuleRow row) {
+        if (dsl == null) return "";
+        String out = dsl;
+        if (out.contains("{decTypes}"))
+            out = out.replace("{decTypes}", Tokens.quoteEachCsv(row.declarationTypes()));
+        if (out.contains("{procCats}"))
+            out = out.replace("{procCats}", Tokens.quoteEachCsv(row.procedureCategories()));
+        if (out.contains("{param}"))
+            out = out.replace("{param}", row.param() == null ? "" : row.param());
+        return out;
+    }
+
     private void writeCatchall(String dslLine) {
         try {
             Path path = Path.of("target/catchall.dsl");
             if (path.getParent() != null) Files.createDirectories(path.getParent());
-            Files.writeString(path, dslLine + System.lineSeparator(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            Files.writeString(path, dslLine + System.lineSeparator(),
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (IOException e) {
             throw new RuntimeException("Failed to write catchall.dsl", e);
         }
