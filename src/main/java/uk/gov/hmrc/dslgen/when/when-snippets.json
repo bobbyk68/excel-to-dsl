@@ -1,47 +1,30 @@
-{
-  "vars": ["DECL","CONS","ITEM","DOC"],
-  "snippets": [
-    {
-      "id": "decl",
-      "phrase": "Declaration Validation request declared with",
-      "provides": ["DECL"],
-      "requires": []
-    },
-    {
-      "id": "consFromDecl",
-      "phrase": "Consignment shipment from declaration",
-      "provides": ["CONS"],
-      "requires": ["DECL"]
-    },
-    {
-      "id": "itemFromCons",
-      "phrase": "Goods Item from shipment",
-      "provides": ["ITEM"],
-      "requires": ["CONS"]
-    },
-    {
-      "id": "docFromItem",
-      "phrase": "Additional Document from item",
-      "provides": ["DOC"],
-      "requires": ["ITEM"]
-    },
-    {
-      "id": "declTypeOneOf",
-      "phrase": "Declaration type oneof {decTypes}",
-      "provides": [],
-      "requires": ["DECL"]
-    },
-    {
-      "id": "procCatOneOf",
-      "phrase": "Declaration procedure category oneof {procCats}",
-      "provides": [],
-      "requires": ["DECL"]
-    },
-    {
-      "id": "authHolderCodeEq",
-      "phrase": "AuthorizationHolder.authorizationType.code must equal {val}",
-      "provides": [],
-      "requires": ["DOC"]
-    }
-  ]
+#!/bin/bash
+
+# Load all rules into an associative array
+declare -A deps
+
+# Extract rule IDs and dependencies into the map
+while IFS= read -r line; do
+rule_id=$(echo "$line" | jq -r '.id')
+dep_list=$(echo "$line" | jq -r '.dependencies | join(",")')
+deps["$rule_id"]="$dep_list"
+done < <(jq -c '.[]' rules.json)
+
+# Recursive function to print the tree
+print_tree() {
+local rule=$1
+local indent=$2
+echo "${indent}- $rule"
+local children="${deps[$rule]}"
+IFS=',' read -ra dep_arr <<< "$children"
+for dep in "${dep_arr[@]}"; do
+[[ -n "$dep" ]] && print_tree "$dep" "  $indent"
+done
 }
+
+# Print full tree for each top-level rule
+for rule in "${!deps[@]}"; do
+echo "Dependency tree for $rule:"
+print_tree "$rule" "  "
+echo ""
+done
