@@ -1,0 +1,105 @@
+IF Block
+
+62 there is at least one Goodsitem requested Procedure.code equals
+
+49 there is at least one Goodsitem specialProcedures.code equals
+
+39 there is at least one Goodsitem additional Documents.type.code equals
+
+39 there is at least one Declaration, Authorization Holder, authorizationType,code equals
+
+36 there is at least one Goodsitem specialProcedures,code equals
+
+30 there is at least one Goodsitem declared Duty TaxFees, preference.code equals
+
+27 there is at least one ConsignmentShipment.valuationAdjustments.type.code equals
+
+23 there is at least one Goodsitem specialProcedures.code equals
+
+21 there is at least one Goodsitem specialProcedures,code equals
+
+10 there is at least one Goodsitem specialProcedures,code equals
+
+9 there is at least one Goodsitem.previousProcedure.code equals
+
+9 there is at least one Goodsitern additional Documents,exemption.code equals
+
+9 there is at least one Goodsitem, special Procedures.code equals
+
+9 there is at least one Goodsitem special Procedures.code equals
+
+9 there is at least one Goodsitem specialProcedures.code equals
+
+9 there is at least one Declaration type.code equals
+
+9 there is at least one Goodsitem specialProcedures.code equals
+
+8 there is at least one Goodsitem specialProcedures.code equals
+
+8 there is at least one Goodsitem additional Documents type.code equals
+
+8 there is at least one Goodsitem declared Duty TaxFees.preference.code equals
+
+8 there is at least one Goodsitem, special Procedures.code equals
+
+8 there is at least one Declaration.type.code equals
+
+8 there is at least one Goodsitem declared DutyTaxFees preference.code equals
+
+7 there is at least one Goodsitem, additionalDocuments.type.code equals
+
+THEN Block
+
+all Goodsitem previous Procedure code must is one of
+
+all Goodsitem.specialProcedures.code must is not one of
+
+at least one Declaration Authorization Holder, authorizationType.code
+
+at least one Goodsitem.additional Documents.type.code must equals
+
+at least one Goodsitem.additionalInformation.code must equals GEN?
+
+at least one Goodsitem Origin subRole code must equals
+
+all Goodsitem.valuationAdjustments.type.code must not equal
+
+at least one Goodsitem.additionalDocuments.type.code must equals
+
+at least one Goodsitem.additionalinformation code must equals GEN3
+
+at least one Goodsitem.specialProcedures.code must is one of
+
+all Goodsitem additional Documents.type.code must is not one of
+
+at least one Goodsitem.additional Documents.type.code must is one of ["
+
+at least one Goodsitem.additionalinformation.code must equals GEN
+
+at least one Goodsitem specialProcedures.code must equals
+
+at least one Declaration AuthorizationHolder authorizationType.code
+
+all Goodsitem.previousProcedure.code must is one of
+
+at least one Goodsitem, additionalInformation,code must equals GEN1 [B
+
+at least one Declaration, type code must is one of
+
+at least one ConsignmentShipment.previousDocuments.type.code muE
+
+at least one Goodsitem.requestedProcedure.code must equals
+
+at least one Goodsitem.commodity.classifications.type must equals [B
+
+at least one Goodsitem.additional Documents.type.code must equals [B
+
+all Goodsitem Origin, subRole code must not equal
+
+['BI
+
+at least one Goodsitem.specialProcedures.code must equals
+
+Somsattol Dienda
+
+Match 2
