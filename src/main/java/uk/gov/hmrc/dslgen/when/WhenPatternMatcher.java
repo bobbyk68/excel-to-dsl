@@ -138,3 +138,43 @@ public class WhenPatternMatcher {
         }
     }
 }
+
+
+// uk/gov/hmrc/rules/core/WhenPatternMatcher.java
+import uk.gov.hmrc.rules.core.index.RuleGraphIndex;
+import uk.gov.hmrc.rules.core.model.RuleRow;
+
+import java.util.List;
+
+public final class WhenPatternMatcher {
+    private final RuleGraphIndex index;
+    private final DslBuilder dsl;
+
+    public WhenPatternMatcher(RuleGraphIndex index, DslBuilder dsl) {
+        this.index = index; this.dsl = dsl;
+    }
+
+    public String collectAll(List<RuleRow> rows) {
+        StringBuilder out = new StringBuilder();
+        for (RuleRow row : rows) {
+            // 1) resolve atomics by exact pattern text (no runtime cleaning)
+            String leftId  = index.patternToId.get(row.ifCondition());
+            String rightId = index.patternToId.get(row.thenCondition());
+            if (leftId == null || rightId == null) {
+                throw new IllegalStateException("Unknown atomic pattern in row: " + row);
+            }
+
+            // 2) confirm composite pair exists
+            String pairKey = RuleGraphIndex.key(leftId, rightId);
+            if (!index.pairSet.contains(pairKey)) {
+                throw new IllegalStateException("No composite for pair " + pairKey + " (row " + row + ")");
+            }
+
+            // 3) render DSLR using atomic patterns + row meta
+            String leftPattern  = index.idToAtomic.get(leftId).pattern();
+            String rightPattern = index.idToAtomic.get(rightId).pattern();
+            dsl.appendRule(out, row, leftPattern, rightPattern);
+        }
+        return out.toString();
+    }
+}

@@ -26,4 +26,39 @@ public class RuleGenerationRunner {
         System.out.println("✅ Wrote target/generated-rules.dslr");
     }
 }
- 
+
+// uk/gov/hmrc/rules/core/RuleGeneratorRunner.java
+import com.fasterxml.jackson.databind.ObjectMapper;
+import uk.gov.hmrc.rules.core.index.RuleGraphIndex;
+import uk.gov.hmrc.rules.core.model.*;
+        import uk.gov.hmrc.rules.emit.DslBuilder;
+import uk.gov.hmrc.rules.excel.ExcelReader;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+public final class RuleGeneratorRunner {
+    public static void main(String[] args) throws Exception {
+        Path rulesJson = Path.of(args[0]);     // e.g. ./rules.json (cleaned, deduped)
+        Path excelPath = Path.of(args[1]);     // your existing 9–10 column Excel
+        String sheet   = args.length > 2 ? args[2] : "Rules";
+
+        // load JSON
+        ObjectMapper om = new ObjectMapper();
+        Bundle bundle = om.readValue(Files.readString(rulesJson), Bundle.class);
+        RuleGraphIndex index = RuleGraphIndex.from(bundle);
+
+        // read Excel
+        ExcelReader reader = new ExcelReader();
+        List<RuleRow> rows = reader.read(excelPath.toString(), sheet);
+
+        // build DSLR
+        WhenPatternMatcher matcher = new WhenPatternMatcher(index, new DslBuilder());
+        String dslr = matcher.collectAll(rows);
+
+        // write output
+        Files.writeString(Path.of("out.dslr"), dslr);
+        System.out.println("Wrote out.dslr (" + rows.size() + " rules)");
+    }
+}
