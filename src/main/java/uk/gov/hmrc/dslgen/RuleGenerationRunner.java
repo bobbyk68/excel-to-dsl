@@ -38,26 +38,53 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+package uk.gov.hmrc.rules.core;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import uk.gov.hmrc.rules.core.model.*;
+        import uk.gov.hmrc.rules.core.match.*;
+        import uk.gov.hmrc.rules.index.CompositeIndex;
+import uk.gov.hmrc.rules.emit.DslBuilder;
+import uk.gov.hmrc.rules.excel.ExcelReader;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.regex.Pattern;
+
 public final class RuleGeneratorRunner {
     public static void main(String[] args) throws Exception {
-        Path rulesJson = Path.of(args[0]);     // e.g. ./rules.json (cleaned, deduped)
-        Path excelPath = Path.of(args[1]);     // your existing 9–10 column Excel
+        Path rulesJson = Path.of(args[0]);   // cleaned JSON (with (.*) / {1})
+        Path excelPath = Path.of(args[1]);   // existing 9–10 column sheet
         String sheet   = args.length > 2 ? args[2] : "Rules";
 
-        // load JSON
+        // 1) Load JSON
         ObjectMapper om = new ObjectMapper();
         Bundle bundle = om.readValue(Files.readString(rulesJson), Bundle.class);
-        RuleGraphIndex index = RuleGraphIndex.from(bundle);
 
-        // read Excel
+        // 2) Compile atomics (anchor regex to whole-line)
+        List<CompiledAtomic> compiled = bundle.atomic().stream()
+                .map(a -> new CompiledAtomic(
+                        a.id(),
+                        Pattern.compile("^" + a.pattern() + "$"),
+                        a.pattern(),
+                        a.dsl()))
+                .collect(Collectors.toList());
+        AtomicMatcher matcher = new AtomicMatcher(compiled);
+
+        // 3) Build composite ordered-pair index
+        CompositeIndex compIndex = CompositeIndex.from(bundle.composite());
+
+        // 4) Read Excel rows
         ExcelReader reader = new ExcelReader();
         List<RuleRow> rows = reader.read(excelPath.toString(), sheet);
 
-        // build DSLR
-        WhenPatternMatcher matcher = new WhenPatternMatcher(index, new DslBuilder());
-        String dslr = matcher.collectAll(rows);
+        // 5) Build DSLR
+        WhenPatternMatcher when = new WhenPatternMatcher(matcher, compIndex, new DslBuilder());
+        String dslr = when.collectAll(rows);
 
-        // write output
+        // 6) Write output
         Files.writeString(Path.of("out.dslr"), dslr);
         System.out.println("Wrote out.dslr (" + rows.size() + " rules)");
     }

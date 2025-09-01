@@ -139,41 +139,47 @@ public class WhenPatternMatcher {
     }
 }
 
+package uk.gov.hmrc.rules.core;
 
-// uk/gov/hmrc/rules/core/WhenPatternMatcher.java
-import uk.gov.hmrc.rules.core.index.RuleGraphIndex;
+import uk.gov.hmrc.rules.core.match.AtomicHit;
+import uk.gov.hmrc.rules.core.match.AtomicMatcher;
 import uk.gov.hmrc.rules.core.model.RuleRow;
+import uk.gov.hmrc.rules.emit.DslBuilder;
+import uk.gov.hmrc.rules.index.CompositeIndex;
 
 import java.util.List;
 
 public final class WhenPatternMatcher {
-    private final RuleGraphIndex index;
+    private final AtomicMatcher matcher;
+    private final CompositeIndex compositeIndex;
     private final DslBuilder dsl;
 
-    public WhenPatternMatcher(RuleGraphIndex index, DslBuilder dsl) {
-        this.index = index; this.dsl = dsl;
+    public WhenPatternMatcher(AtomicMatcher matcher, CompositeIndex compositeIndex, DslBuilder dsl) {
+        this.matcher = matcher;
+        this.compositeIndex = compositeIndex;
+        this.dsl = dsl;
     }
 
+    /** Existing contract preserved: returns a DSLR string */
     public String collectAll(List<RuleRow> rows) {
         StringBuilder out = new StringBuilder();
         for (RuleRow row : rows) {
-            // 1) resolve atomics by exact pattern text (no runtime cleaning)
-            String leftId  = index.patternToId.get(row.ifCondition());
-            String rightId = index.patternToId.get(row.thenCondition());
-            if (leftId == null || rightId == null) {
-                throw new IllegalStateException("Unknown atomic pattern in row: " + row);
+            // Excel literals (with concrete values)
+            String leftLiteral  = row.ifCondition();
+            String rightLiteral = row.thenCondition();
+
+            // Regex match → atomic ids
+            AtomicHit left  = matcher.matchAtomic(leftLiteral);
+            AtomicHit right = matcher.matchAtomic(rightLiteral);
+
+            // Confirm composite ordered pair exists (pair is just “found” gate)
+            String pairKey = left.id() + "|" + right.id();
+            if (!compositeIndex.contains(pairKey)) {
+                throw new IllegalStateException("Composite not found for pair " + pairKey + " (row " + row + ")");
             }
 
-            // 2) confirm composite pair exists
-            String pairKey = RuleGraphIndex.key(leftId, rightId);
-            if (!index.pairSet.contains(pairKey)) {
-                throw new IllegalStateException("No composite for pair " + pairKey + " (row " + row + ")");
-            }
-
-            // 3) render DSLR using atomic patterns + row meta
-            String leftPattern  = index.idToAtomic.get(leftId).pattern();
-            String rightPattern = index.idToAtomic.get(rightId).pattern();
-            dsl.appendRule(out, row, leftPattern, rightPattern);
+            // Render when/then using literals; annotations taken from RuleRow
+            dsl.appendRule(out, row, leftLiteral, rightLiteral);
         }
         return out.toString();
     }

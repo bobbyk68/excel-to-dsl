@@ -63,3 +63,34 @@ public class DslBuilder {
                 "end";
     }
 }
+
+package uk.gov.hmrc.rules.emit;
+
+import uk.gov.hmrc.rules.core.model.RuleRow;
+
+/** Renders DSLR using Excel literals; prepend is a visual no-op via .dsl mapping */
+public final class DslBuilder {
+    private static final String PREPEND = "Goods item exists"; // in .dsl: [when] Goods item exists =
+
+    public void appendRule(StringBuilder out, RuleRow row, String leftLiteral, String rightLiteral) {
+        String name = (row.businessRuleId() != null && !row.businessRuleId().isBlank())
+                ? row.businessRuleId()
+                : "Rule_" + Integer.toHexString(System.identityHashCode(row));
+
+        out.append("rule \"").append(name).append("\"\n");
+        if (row.errorCode() != null && !row.errorCode().isBlank())
+            out.append("@ErrorCode(\"").append(row.errorCode()).append("\")\n");
+        if (row.declarationType() != null && !row.declarationType().isBlank())
+            out.append("@declarationType(\"").append(row.declarationType()).append("\")\n");
+        if (row.procedureCategory() != null && !row.procedureCategory().isBlank())
+            out.append("@procedureCategory(\"").append(row.procedureCategory()).append("\")\n");
+
+        out.append("when\n")
+                .append("    ").append(PREPEND).append("\n")
+                .append("    - ").append(leftLiteral).append("\n")
+                .append("    - ").append(rightLiteral).append("\n")
+                .append("then\n")
+                .append("    // action here\n")
+                .append("end\n\n");
+    }
+}
