@@ -1,6 +1,6 @@
 package uk.gov.hmrc.dslgen.service;
 
-import uk.gov.hmrc.dslgen.io.ExcelLoader;
+import uk.gov.hmrc.dslgen.io.ExcelReader;
 import uk.gov.hmrc.dslgen.model.AtomicText;
 import uk.gov.hmrc.dslgen.model.RuleBook;
 import uk.gov.hmrc.dslgen.util.TextCanonicalizer;
@@ -8,19 +8,26 @@ import uk.gov.hmrc.dslgen.util.TextCanonicalizer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Deduplicates IF/THEN rows into a single atomics list and composite pairs.
+ */
 public final class DedupService {
 
-    public static RuleBook buildRuleBook(List<ExcelLoader.IfThenRow> rows) {
+    private DedupService() {}
+
+    public static RuleBook buildRuleBook(List<ExcelReader.IfThenRow> rows) {
+        // dictionary of text -> id
         Map<String, String> textToId = new LinkedHashMap<>();
         List<AtomicText> atomicsOut = new ArrayList<>();
         List<List<String>> compositesOut = new ArrayList<>();
 
+        // to detect duplicates
         Set<String> seenPairs = new HashSet<>();
         List<Integer> duplicateRowIds = new ArrayList<>();
 
         AtomicInteger seq = new AtomicInteger(1);
 
-        for (ExcelLoader.IfThenRow r : rows) {
+        for (ExcelReader.IfThenRow r : rows) {
             String left  = TextCanonicalizer.canonical(r.ifBlock());
             String right = TextCanonicalizer.canonical(r.thenBlock());
 
@@ -42,7 +49,7 @@ public final class DedupService {
 
     private static String nextId(AtomicInteger seq, List<AtomicText> atomics, String text) {
         int n = seq.getAndIncrement();
-        String id = "a" + (n < 100 ? String.format("%02d", n) : Integer.toString(n));
+        String id = "a" + (n < 100 ? String.format("%02d", n) : n);
         atomics.add(new AtomicText(id, text));
         return id;
     }
