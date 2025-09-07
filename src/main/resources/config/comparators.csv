@@ -1,5 +1,0 @@
-#name,synonyms,lhs_pretty,rhs_string,rhs_numeric
-EQUALS,equals|must equal|must equals,equals {VAL},"exists {Class}( {fieldPath} == \"{VAL}\" )","exists {Class}( {fieldPath} != null, eval( {fieldPath}.compareTo(new java.math.BigDecimal(\"{VAL}\")) == 0 ) )"
-NOT_EQUALS,must not equal,must not equal {VAL},"not {Class}( {fieldPath} == \"{VAL}\" )","not {Class}( {fieldPath} != null, eval( {fieldPath}.compareTo(new java.math.BigDecimal(\"{VAL}\")) == 0 ) )"
-ONE_OF,must is one of|must be one of|must be either,must be one of {CSV},"not {Class}( {fieldPath} not in ({CSV}) )","Number( intValue == 0 ) from accumulate( {Class}( {fieldPath} != null, eval( !uk.gov.hmrc.dslgen.simple.num.Num.in({fieldPath}, \"{CSV}\") ) ), count(1) )"
-NOT_ONE_OF,must is not one of|must not be one of,must not be one of {CSV},"not {Class}( {fieldPath} in ({CSV}) )","Number( intValue == 0 ) from accumulate( {Class}( {fieldPath} != null, eval( uk.gov.hmrc.dslgen.simple.num.Num.in({fieldPath}, \"{CSV}\") ) ), count(1) )"

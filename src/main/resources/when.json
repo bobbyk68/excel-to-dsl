@@ -1,4 +1,0 @@
-{
-  "LicenseActive": { "code": "License(active == true, type == \"${type}\")" },
-  "HasExpiry":     { "code": "License(expiry != null)" }
-}

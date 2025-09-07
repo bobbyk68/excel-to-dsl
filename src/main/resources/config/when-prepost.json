@@ -1,6 +1,0 @@
-{
-  "prepend": [
-    "$doc : Document()"
-  ],
-  "append": []
-}

@@ -1,6 +1,0 @@
-{
-  "FlagError": { "code": "results.addError(\"${code}\", \"${message}\");" },
-  "SetFlag":   { "code": "license.setFlag(true);" }
-}
-
-
