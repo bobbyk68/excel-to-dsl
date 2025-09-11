@@ -1,4 +1,4 @@
-package uk.gov.hmrc.rulegen.support;
+package uk.gov.hmrc.dslgen.support;
 
 import uk.gov.hmrc.rulegen.model.AtomicHit;
 
@@ -15,18 +15,42 @@ public final class DslMappingBuilder {
      *   groups[3] = quantifier (e.g., "at least one") -- optional
      */
     public static String buildWhenRhs(AtomicHit hit) {
+        // NEW: pull the literal (raw Excel clause)
+        String literal = hit.literal();
+
+// Existing:
         List<String> g = hit.groups();
-        String path       = g.size() > 0 ? g.get(0) : "";
-        String value      = g.size() > 1 ? g.get(1) : "";
-        String list       = g.size() > 2 ? g.get(2) : "";
-        String quantifier = g.size() > 3 ? g.get(3) : "EXISTS"; // default
+        String path = (g.size() > 0 && g.get(0) != null) ? g.get(0).trim() : "";
 
-        String root = rootType(path);   // e.g., "GoodItem"
-        String leaf = leafField(path);  // e.g., "code"
+// CHANGE: if path isn’t dotted, recover from literal
+        if (path.indexOf('.') < 0 && literal != null) {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("([A-Z][a-zA-Z]+(?:\\.[A-Za-z_][A-Za-z0-9_]*)+)")
+                    .matcher(literal);
+            if (m.find()) {
+                path = m.group(1);
+            }
+        }
 
-        // crude operator detection: based on DSL text or group contents
+// derive root/leaf (unchanged helpers)
+        String root = rootType(path);   // e.g. GoodItem
+        String leaf = leafField(path);  // e.g. code
+
+// value/list as you already do
+        String value = g.size() > 1 ? g.get(1) : "";
+        String list  = g.size() > 2 ? g.get(2) : "";
+
+// operator: first from DSL, fallback to literal
         String op = detectOp(hit.dsl());
+        if ("equals".equals(op) && literal != null && !hit.dsl().toLowerCase().contains("equals")) {
+            op = detectOp(literal); // fallback heuristic
+        }
 
+// quantifier: keep your existing way, fallback to literal text
+        String q = g.size() > 3 ? g.get(3) : null;
+        if (q == null && literal != null) q = literal; // normalizeQuantifier will parse it
+
+// build constraint (your existing switch)
         String constraint = switch (op) {
             case "equals"     -> leaf + " == {value}";
             case "notEquals"  -> leaf + " != {value}";
@@ -41,12 +65,14 @@ public final class DslMappingBuilder {
             default           -> "true";
         };
 
-        return switch (normalizeQuantifier(quantifier)) {
-            case "EXISTS"   -> "exists " + root + "( " + constraint + " )";
-            case "NONE"     -> "not( " + root + "( " + constraint + " ) )";
-            case "ALL"      -> "not( " + root + "( " + negateConstraint(op,constraint) + " ) )";
-            default         -> root + "( " + constraint + " )";
+// wrap with quantifier (your existing switch)
+        return switch (normalizeQuantifier(q)) {
+            case "EXISTS" -> "exists " + root + "( " + constraint + " )";
+            case "NONE"   -> "not( "   + root + "( " + constraint + " ) )";
+            case "ALL"    -> "not( "   + root + "( " + negateConstraint(op, constraint) + " ) )";
+            default       ->             root + "( " + constraint + " )";
         };
+
     }
 
     // ---- helpers ----

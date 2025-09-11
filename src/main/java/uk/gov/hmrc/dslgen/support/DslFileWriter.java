@@ -1,4 +1,4 @@
-package uk.gov.hmrc.support;
+package uk.gov.hmrc.dslgen.support;
 
 public final class DslFileWriter {
     private final List<String> lines = new ArrayList<>();
