@@ -1,121 +1,90 @@
 package uk.gov.hmrc.dslgen.support;
 
-import uk.gov.hmrc.rulegen.model.AtomicHit;
+ipackage uk.gov.hmrc.rules.builder;
 
-import java.util.List;
+import java.util.*;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-public final class DslMappingBuilder {
+public final class DslBuilder {
+
+    // Matches "left - right" with optional surrounding whitespace, but requires whitespace around '-'
+    private static final Pattern SPLIT_ON_HYPHEN_WITH_SPACES = Pattern.compile("\\s+-\\s+");
 
     /**
-     * Build the RHS DRL condition for a [when] mapping line, using ordered regex groups.
-     * Convention:
-     *   groups[0] = path   (e.g., GoodItem.specialProcedures.code)
-     *   groups[1] = value  (e.g., GEN3)   -- optional depending on pattern
-     *   groups[2] = list   (e.g., G03,G04) -- optional
-     *   groups[3] = quantifier (e.g., "at least one") -- optional
+     * Builds one or more DSL "[when]" RHS lines depending on the captured literal(s).
+     * - If the literal is "A - B" (spaces around '-'), this returns two DSL lines, one per part.
+     * - Otherwise, returns a single DSL line.
      */
-    public static String buildWhenRhs(AtomicHit hit) {
-        // NEW: pull the literal (raw Excel clause)
-        String literal = hit.literal();
+    public List<String> buildWhenRhs(DslInput input) {
+        // Example: input.dslTemplate() like "goodsitem with special procedure exists - with code equals {value}"
+        // or "{1}" style placeholders — both supported by formatDsl(..)
+        final String template = Objects.requireNonNull(input.dslTemplate(), "dslTemplate");
+        final String literal  = Objects.requireNonNull(input.rightLiteral(), "rightLiteral").trim();
 
-// Existing:
-        List<String> g = hit.groups();
-        String path = (g.size() > 0 && g.get(0) != null) ? g.get(0).trim() : "";
+        // Heuristic: only split when there is whitespace around the hyphen. "A - B" → ["A", "B"]
+        // "AA-123" or "A-B" remains a single literal.
+        final String[] parts = SPLIT_ON_HYPHEN_WITH_SPACES.split(literal);
 
-// CHANGE: if path isn’t dotted, recover from literal
-        if (path.indexOf('.') < 0 && literal != null) {
-            java.util.regex.Matcher m = java.util.regex.Pattern
-                    .compile("([A-Z][a-zA-Z]+(?:\\.[A-Za-z_][A-Za-z0-9_]*)+)")
-                    .matcher(literal);
-            if (m.find()) {
-                path = m.group(1);
-            }
+        if (parts.length > 1) {
+            // multiple values → multiple lines, dedup & keep order
+            return Arrays.stream(parts)
+                    .map(String::trim)
+                    .filter(p -> !p.isEmpty())
+                    .map(p -> formatDsl(template, p))
+                    .distinct()
+                    .collect(Collectors.toList());
         }
 
-// derive root/leaf (unchanged helpers)
-        String root = rootType(path);   // e.g. GoodItem
-        String leaf = leafField(path);  // e.g. code
+        // single value path
+        return List.of(formatDsl(template, literal));
+    }
 
-// value/list as you already do
-        String value = g.size() > 1 ? g.get(1) : "";
-        String list  = g.size() > 2 ? g.get(2) : "";
+    /**
+     * Compatibility helper for legacy call sites that expect a single String.
+     * Join with newline by default (customize the delimiter if needed).
+     */
+    public String buildWhenRhsJoined(DslInput input) {
+        return String.join("\n", buildWhenRhs(input));
+    }
 
-// operator: first from DSL, fallback to literal
-        String op = detectOp(hit.dsl());
-        if ("equals".equals(op) && literal != null && !hit.dsl().toLowerCase().contains("equals")) {
-            op = detectOp(literal); // fallback heuristic
+    /**
+     * Replaces either {value} or {1} placeholder conventions.
+     * If neither placeholder exists, append the value at the end (defensive).
+     */
+    private String formatDsl(String template, String value) {
+        if (template.contains("{value}")) {
+            return template.replace("{value}", escape(value));
+        }
+        if (template.contains("{1}")) {
+            return template.replace("{1}", escape(value));
+        }
+        // Defensive fallback: append a space + value to template
+        return template + " " + escape(value);
+    }
+
+    /**
+     * Minimal escaping hook in case the DSL has reserved characters.
+     * Expand as your DSL requires (quotes, backslashes, etc.).
+     */
+    private String escape(String raw) {
+        // Example: wrap in quotes if contains space (optional)
+        // return raw.contains(" ") ? "'" + raw.replace("'", "\\'") + "'" : raw;
+        return raw;
+    }
+
+    // Simple DTO for clarity (adjust to your actual AtomicHit / inputs)
+    public static final class DslInput {
+        private final String dslTemplate;
+        private final String rightLiteral;
+
+        public DslInput(String dslTemplate, String rightLiteral) {
+            this.dslTemplate = dslTemplate;
+            this.rightLiteral = rightLiteral;
         }
 
-// quantifier: keep your existing way, fallback to literal text
-        String q = g.size() > 3 ? g.get(3) : null;
-        if (q == null && literal != null) q = literal; // normalizeQuantifier will parse it
-
-// build constraint (your existing switch)
-        String constraint = switch (op) {
-            case "equals"     -> leaf + " == {value}";
-            case "notEquals"  -> leaf + " != {value}";
-            case "in"         -> leaf + " in ({list})";
-            case "notIn"      -> "!(" + leaf + " in ({list}))";
-            case "gt"         -> leaf + " > {value}";
-            case "gte"        -> leaf + " >= {value}";
-            case "lt"         -> leaf + " < {value}";
-            case "lte"        -> leaf + " <= {value}";
-            case "present"    -> "this != null";
-            case "absent"     -> "this == null";
-            default           -> "true";
-        };
-
-// wrap with quantifier (your existing switch)
-        return switch (normalizeQuantifier(q)) {
-            case "EXISTS" -> "exists " + root + "( " + constraint + " )";
-            case "NONE"   -> "not( "   + root + "( " + constraint + " ) )";
-            case "ALL"    -> "not( "   + root + "( " + negateConstraint(op, constraint) + " ) )";
-            default       ->             root + "( " + constraint + " )";
-        };
-
-    }
-
-    // ---- helpers ----
-    private static String rootType(String path) {
-        int dot = path.indexOf('.');
-        return dot > 0 ? path.substring(0, dot) : path;
-    }
-    private static String leafField(String path) {
-        int dot = path.lastIndexOf('.');
-        return dot >= 0 ? path.substring(dot + 1) : path;
-    }
-
-    private static String normalizeQuantifier(String q) {
-        if (q == null) return "EXISTS";
-        String t = q.toLowerCase();
-        if (t.contains("none")) return "NONE";
-        if (t.contains("all")) return "ALL";
-        if (t.contains("at least one")) return "EXISTS";
-        return "EXISTS";
-    }
-
-    private static String detectOp(String dsl) {
-        String lower = dsl.toLowerCase();
-        if (lower.contains(" not equal")) return "notEquals";
-        if (lower.contains(" equals")) return "equals";
-        if (lower.contains(" one of")) return "in";
-        if (lower.contains(" not one of")) return "notIn";
-        if (lower.contains(" greater than or equal")) return "gte";
-        if (lower.contains(" greater than")) return "gt";
-        if (lower.contains(" less than or equal")) return "lte";
-        if (lower.contains(" less than")) return "lt";
-        if (lower.contains(" must be present")) return "present";
-        if (lower.contains(" must not be present")) return "absent";
-        return "equals";
-    }
-
-    private static String negateConstraint(String op, String c) {
-        return switch (op) {
-            case "equals"    -> c.replace("==","!=");
-            case "notEquals" -> c.replace("!=","==");
-            case "in"        -> c.replace(" in "," not in ");
-            case "notIn"     -> c.replace("not in","in");
-            default          -> "!("+c+")";
-        };
+        public String dslTemplate() { return dslTemplate; }
+        public String rightLiteral() { return rightLiteral; }
     }
 }
