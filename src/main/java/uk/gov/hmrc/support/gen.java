@@ -24,5 +24,18 @@ public class gen {
 // when done (per file or at end):
 // dslWriter.writeTo(Paths.get("rules.dsl"));
 
+
+        // assume you have: AtomicHit { String id, String dsl, List<String> groups }
+        DslFileWriter dslWriter = new DslFileWriter();
+
+// ... inside your per-row loop, for each AtomicHit 'hit' you already built:
+        String lhsWhen = "[when] " + hit.dsl();                    // LHS from JSON (verbatim template)
+        String rhsWhen = DslMappingBuilder.buildWhenRhs(hit);      // RHS generated from groups/op/quantifier
+        dslWriter.appendWhen(lhsWhen, rhsWhen);
+
+// after you’ve processed all rows:
+        dslWriter.writeTo(Paths.get("build/output/rules.dsl"));
+
+
     }
 }
