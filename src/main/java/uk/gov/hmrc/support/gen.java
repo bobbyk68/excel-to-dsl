@@ -24,6 +24,7 @@ public class gen {
 // when done (per file or at end):
 // dslWriter.writeTo(Paths.get("rules.dsl"));
 
+        
 
         // assume you have: AtomicHit { String id, String dsl, List<String> groups }
         DslFileWriter dslWriter = new DslFileWriter();
