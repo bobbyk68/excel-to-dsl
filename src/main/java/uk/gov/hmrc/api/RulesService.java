@@ -1,83 +1,58 @@
-package uk.gov.hmrc.api;
+package uk.gov.hmrc.rules.service;
 
-import org.kie.api.runtime.KieContainer;
+import org.kie.api.runtime.KieBase;
 import org.kie.api.runtime.KieSession;
-import org.slf4j.MDC;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import uk.gov.hmrc.rules.infra.BatchRegistry;
-import uk.gov.hmrc.rules.listener.RuleEventListener;
-import uk.gov.hmrc.rules.logging.RuleLog;
+import uk.gov.hmrc.rules.context.BatchRegistry;
+import uk.gov.hmrc.rules.context.RuleRunContext;
+import uk.gov.hmrc.rules.listener.RuleListenerFactory;
 
-import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
-import java.util.concurrent.TimeUnit;
 
 @Service
 public class RulesService {
+    private final KieBase kieBase;
+    private final BatchRegistry registry;
+    private final RuleListenerFactory listenerFactory;
 
-    private final KieContainer kieContainer;
-    private final Executor rulesBatchExecutor;
-    private final BatchRegistry batchRegistry;
-
-    // configure your single "standard" batch timeout here (ms)
-    private final long batchTimeoutMs = 5_000L;
-
-    public RulesService(KieContainer kieContainer,
-                        Executor rulesBatchExecutor,
-                        BatchRegistry batchRegistry) {
-        this.kieContainer = Objects.requireNonNull(kieContainer);
-        this.rulesBatchExecutor = Objects.requireNonNull(rulesBatchExecutor);
-        this.batchRegistry = Objects.requireNonNull(batchRegistry);
+    public RulesService(KieBase kieBase, BatchRegistry registry, RuleListenerFactory listenerFactory) {
+        this.kieBase = kieBase;
+        this.registry = registry;
+        this.listenerFactory = listenerFactory;
     }
 
-    /**
-     * Runs ALL rules with a single standard timeout via orTimeout(...).
-     * No DRL changes, no per-rule timers.
-     */
-    public CompletableFuture<Void> runRules(ValidateDeclaration decl) {
-        // Ensure opId once per batch (MDC only for cosmetics; registry holds the truth)
-        String opId = MDC.get("opId");
-        if (opId == null || opId.isBlank()) {
-            opId = UUID.randomUUID().toString();
-            MDC.put("opId", opId);
+    @Async("rulesExecutor")
+    public CompletableFuture<ReceiveValidationResults> executeRules(DeclarationValidationRequest req) {
+        // Create once at the boundary (caller can also supply opId if you have one)
+        String opId  = UUID.randomUUID().toString();
+        String label = "DeclarationValidation";
+        RuleRunContext ctx = new RuleRunContext(opId, label);
+        registry.register(ctx);
+
+        KieSession ks = null;
+        try {
+            ks = kieBase.newKieSession();
+            ks.addEventListener(listenerFactory.create(ctx));   // <-- clean injection
+
+            // run your pipeline (sync inside @Async)
+            ReceiveValidationResults res = runRules(ks, req, ctx);
+            registry.complete(opId);
+
+            return CompletableFuture.completedFuture(res);
+        } catch (RuntimeException ex) {
+            // attach your timeout/cooperative halt logic if needed
+            throw ex;
+        } finally {
+            if (ks != null) ks.dispose();
+            registry.remove(opId);
         }
-        final String batchOpId = opId;
+    }
 
-        // Start batch tracking
-        batchRegistry.start(batchOpId);
-
-        CompletableFuture<Void> cf = CompletableFuture.runAsync(() -> {
-            KieSession ksession = kieContainer.newKieSession();
-            try {
-                // Listener updates lastRuleId/Name in beforeMatchFired
-                ksession.addEventListener(new RuleEventListener(batchOpId, batchRegistry));
-
-                ksession.insert(decl);
-                ksession.fireAllRules();
-
-                // Batch finished OK
-                long elapsed = batchRegistry.elapsedMs(batchOpId);
-                RuleLog.okBatch(batchOpId, elapsed);
-            } finally {
-                try { ksession.dispose(); } catch (Exception ignored) { }
-                batchRegistry.finish(batchOpId);
-            }
-        }, rulesBatchExecutor);
-
-        // Single standard timeout for the whole batch
-        return cf.orTimeout(batchTimeoutMs, TimeUnit.MILLISECONDS)
-                 .exceptionally(err -> {
-                     long elapsed = batchRegistry.elapsedMs(batchOpId);
-                     var be = batchRegistry.get(batchOpId); // may be null if finished
-                     String lastRuleId = (be == null) ? "" : be.lastRuleId;
-                     String lastRuleName = (be == null) ? "" : be.lastRuleName;
-
-                     RuleLog.timeoutBatch(batchOpId, lastRuleId, lastRuleName, elapsed < 0 ? -1 : elapsed);
-
-                     // propagate as RuntimeException so the caller sees the timeout if they care
-                     throw (err instanceof RuntimeException re) ? re : new RuntimeException(err);
-                 });
+    private ReceiveValidationResults runRules(KieSession ks, DeclarationValidationRequest req, RuleRunContext ctx) {
+        // insert facts, fireAllRules, etc.
+        ks.fireAllRules();
+        return new ReceiveValidationResults();
     }
 }

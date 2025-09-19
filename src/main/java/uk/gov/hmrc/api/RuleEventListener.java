@@ -1,32 +1,25 @@
-package uk.gov.hmrc.api;
+package uk.gov.hmrc.rules.listener;
 
-import org.kie.api.definition.rule.Rule;
-import org.kie.api.event.rule.BeforeMatchFiredEvent;
 import org.kie.api.event.rule.DefaultAgendaEventListener;
-import uk.gov.hmrc.rules.infra.BatchRegistry;
+import org.kie.api.event.rule.BeforeMatchFiredEvent;
+import uk.gov.hmrc.rules.context.BatchRegistry;
+import uk.gov.hmrc.rules.context.RuleRunContext;
 
-import java.util.Objects;
+public final class RuleEventListener extends DefaultAgendaEventListener {
+    private final RuleRunContext ctx;
+    private final BatchRegistry registry;
 
-/**
- * Updates "last seen rule" so, if the batch times out, we know which rule was running.
- * No per-rule timers; no DRL metadata required.
- */
-public class RuleEventListener extends DefaultAgendaEventListener {
-
-    private final String opId;
-    private final BatchRegistry batchRegistry;
-
-    public RuleEventListener(String opId, BatchRegistry batchRegistry) {
-        this.opId = Objects.requireNonNull(opId, "opId");
-        this.batchRegistry = Objects.requireNonNull(batchRegistry);
+    RuleEventListener(RuleRunContext ctx, BatchRegistry registry) {
+        this.ctx = ctx;
+        this.registry = registry;
     }
 
     @Override
-    public void beforeMatchFired(BeforeMatchFiredEvent event) {
-        Rule rule = event.getMatch().getRule();
-        String ruleName = rule.getName();
-        // We use ruleName as the stable id to avoid modifying DRLs.
-        String ruleId = ruleName;
-        batchRegistry.updateLastRule(opId, ruleId, ruleName);
+    public void beforeMatchFired(BeforeMatchFiredEvent e) {
+        // Example: lightweight correlation-friendly logging
+        // (No MDC required)
+        // log.debug("opId={} firing rule={}", ctx.opId(), e.getMatch().getRule().getName());
+        // If you ever need registry (e.g. to annotate current rule), it's here.
+        registry.get(ctx.opId()); // optional use
     }
 }

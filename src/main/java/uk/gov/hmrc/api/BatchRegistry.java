@@ -1,50 +1,22 @@
-package uk.gov.hmrc.api;
+package uk.gov.hmrc.rules.context;
 
-import java.util.Objects;
+import org.springframework.stereotype.Component;
+
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
+@Component
 public final class BatchRegistry {
+    private final ConcurrentMap<String, BatchContext> byOpId = new ConcurrentHashMap<>();
 
-    public static final class BatchEntry {
-        public final String opId;
-        public final long startNanos;
-        public volatile String lastRuleId = "";
-        public volatile String lastRuleName = "";
-        public volatile boolean done = false;
-
-        public BatchEntry(String opId, long startNanos) {
-            this.opId = Objects.requireNonNull(opId, "opId");
-            this.startNanos = startNanos;
-        }
+    public BatchContext register(RuleRunContext ctx) {
+        return byOpId.computeIfAbsent(ctx.opId(), k -> new BatchContext(ctx.opId(), ctx.label()));
     }
-
-    private final ConcurrentHashMap<String, BatchEntry> batches = new ConcurrentHashMap<>();
-
-    public BatchEntry start(String opId) {
-        BatchEntry e = new BatchEntry(opId, System.nanoTime());
-        batches.put(opId, e);
-        return e;
+    public Optional<BatchContext> get(String opId) {
+        return Optional.ofNullable(byOpId.get(opId));
     }
-
-    public BatchEntry get(String opId) { return opId == null ? null : batches.get(opId); }
-
-    public void updateLastRule(String opId, String ruleId, String ruleName) {
-        BatchEntry e = get(opId);
-        if (e != null) {
-            e.lastRuleId = ruleId == null ? "" : ruleId;
-            e.lastRuleName = ruleName == null ? "" : ruleName;
-        }
-    }
-
-    public void finish(String opId) {
-        BatchEntry e = get(opId);
-        if (e != null) e.done = true;
-        if (opId != null) batches.remove(opId);
-    }
-
-    public long elapsedMs(String opId) {
-        BatchEntry e = get(opId);
-        if (e == null) return -1L;
-        return (System.nanoTime() - e.startNanos) / 1_000_000L;
-    }
+    public void markTimeout(String opId) { get(opId).ifPresent(BatchContext::tryTimeout); }
+    public void complete(String opId)    { get(opId).ifPresent(BatchContext::tryComplete); }
+    public void remove(String opId)      { byOpId.remove(opId); }
 }
