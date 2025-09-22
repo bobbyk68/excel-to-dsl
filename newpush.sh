@@ -1,347 +1,294 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-BASE=src/main/java/uk/gov/hmrc/rules
-mkdir -p $BASE/context $BASE/listener $BASE/service $BASE/web $BASE/model
+# Create a clean workspace
+ROOT_DIR="rules-dslr-demo"
+SRC_DIR="$ROOT_DIR/src"
+mkdir -p "$SRC_DIR"
+echo "Workspace: $ROOT_DIR"
 
-############################################
-# context/BatchContext.java (state machine + diagnostics)
-############################################
-cat > $BASE/context/BatchContext.java <<'EOF'
-package uk.gov.hmrc.rules.context;
+########################################################################
+# Write source files
+########################################################################
 
-import java.time.Instant;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+cat > "$SRC_DIR/EnglishQuantifier.java" <<'EOF'
+public enum EnglishQuantifier {
+    EXISTS, FOR_ALL, NONE, EXACTLY, ATOMIC;
 
-public final class BatchContext {
-
-    public enum Status { NEW, COMPLETED, TIMED_OUT }
-    public enum Phase  { STARTED, FACTS_INSERTED, ACTIVATING, FIRING }
-
-    private final String opId;
-    private final String label;
-    private final long startNanos = System.nanoTime();
-    private final Instant startTime = Instant.now();
-
-    private final AtomicReference<Status> status = new AtomicReference<>(Status.NEW);
-    private final AtomicLong endNanos = new AtomicLong(0L);
-
-    // Diagnostics
-    private final AtomicReference<String> lastActivationRule = new AtomicReference<>(null);
-    private final AtomicReference<String> currentRule       = new AtomicReference<>(null);
-    private final AtomicReference<Phase>  phase             = new AtomicReference<>(Phase.STARTED);
-
-    public BatchContext(String opId, String label) {
-        this.opId = opId;
-        this.label = label;
+    public static EnglishQuantifier fromText(String english) {
+        String s = (english == null ? "" : english).toLowerCase().trim();
+        if (s.startsWith("there is at least one") || s.startsWith("at least one")) return EXISTS;
+        if (s.startsWith("all ") || s.contains(" must all ") || s.contains(" must be all ")) return FOR_ALL;
+        if (s.startsWith("none ") || s.contains(" must not ") || s.contains(" no ")) return NONE;
+        if (s.startsWith("exactly")) return EXACTLY;
+        return ATOMIC;
     }
 
-    public String opId()   { return opId; }
-    public String label()  { return label; }
-    public Status status() { return status.get(); }
-
-    public boolean tryComplete() {
-        if (status.compareAndSet(Status.NEW, Status.COMPLETED)) {
-            endNanos.compareAndSet(0L, System.nanoTime());
-            return true;
-        }
-        return false;
-    }
-
-    public boolean tryTimeout() {
-        if (status.compareAndSet(Status.NEW, Status.TIMED_OUT)) {
-            endNanos.compareAndSet(0L, System.nanoTime());
-            return true;
-        }
-        return false;
-    }
-
-    public long elapsedMillis() {
-        long end = endNanos.get();
-        if (end == 0L) end = System.nanoTime();
-        long diff = end - startNanos;
-        return diff <= 0 ? 0 : diff / 1_000_000;
-    }
-
-    // ---- Diagnostics helpers ----
-    public void setPhase(Phase p) { phase.set(p); }
-    public Phase phase() { return phase.get(); }
-
-    public void setLastActivationRule(String ruleName) { lastActivationRule.set(ruleName); }
-    public void setCurrentRule(String ruleName)        { currentRule.set(ruleName); }
-
-    public String lastActivationRule() { return lastActivationRule.get(); }
-    public String currentRule()        { return currentRule.get(); }
-
-    /** Best-effort rule name for timeouts / diagnostics. */
-    public String ruleForDiagnostics() {
-        String firing = currentRule.get();
-        if (firing != null) return firing;
-        String pending = lastActivationRule.get();
-        return (pending != null) ? pending : "no-activation";
+    /** "exactly one ..." -> 1, "exactly 2 ..." -> 2 */
+    public static int extractExactlyN(String english) {
+        if (english == null) throw new IllegalArgumentException("english is null");
+        String[] t = english.toLowerCase().split("\\s+");
+        if (t.length > 1 && t[0].equals("exactly")) return Integer.parseInt(t[1]);
+        throw new IllegalArgumentException("Not an 'exactly' phrase: " + english);
     }
 }
 EOF
 
-############################################
-# context/BatchRegistry.java (singleton)
-############################################
-cat > $BASE/context/BatchRegistry.java <<'EOF'
-package uk.gov.hmrc.rules.context;
+cat > "$SRC_DIR/EnglishOperator.java" <<'EOF'
+public enum EnglishOperator {
+    LT("<"), LTE("<="), GT(">"), GTE(">="), EQ("=="), NE("!=");
 
-import org.springframework.stereotype.Component;
+    private final String symbol;
+    EnglishOperator(String s){ this.symbol = s; }
+    public String symbol(){ return symbol; }
 
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-
-@Component
-public final class BatchRegistry {
-
-    private final ConcurrentMap<String, BatchContext> byOpId = new ConcurrentHashMap<>();
-
-    public BatchContext register(String opId, String label) {
-        return byOpId.computeIfAbsent(opId, k -> new BatchContext(opId, label));
+    public static EnglishOperator fromText(String english) {
+        String s = (english == null ? "" : english).toLowerCase();
+        // normalise symbols/wording
+        s = s.replace("≤","less than or equal to").replace("≥","greater than or equal to");
+        if (s.contains("less than or equal to") || s.contains("less or equal to") || s.contains("<=")) return LTE;
+        if (s.contains("greater than or equal to") || s.contains("greater or equal to") || s.contains(">=")) return GTE;
+        if (s.matches(".*\\bless than\\b.*") || s.contains(" < ")) return LT;
+        if (s.matches(".*\\bgreater than\\b.*") || s.contains(" > ")) return GT;
+        if (s.matches(".*\\bnot equal\\b.*") || s.contains("!=")) return NE;
+        if (s.matches(".*\\bequal to\\b.*") || s.contains(" equals ") || s.contains("==")) return EQ;
+        // fallback: if no operator keywords, default to EQ (useful for "equals C676")
+        return EQ;
     }
 
-    public Optional<BatchContext> get(String opId) {
-        return Optional.ofNullable(byOpId.get(opId));
-    }
-
-    public void remove(String opId) {
-        byOpId.remove(opId);
-    }
-}
-EOF
-
-############################################
-# model/DeclarationValidationRequest.java
-############################################
-cat > $BASE/model/DeclarationValidationRequest.java <<'EOF'
-package uk.gov.hmrc.rules.model;
-
-public class DeclarationValidationRequest {
-    // minimal placeholder fields; extend as needed
-    private String declarationId;
-
-    public DeclarationValidationRequest() {}
-
-    public DeclarationValidationRequest(String declarationId) {
-        this.declarationId = declarationId;
-    }
-
-    public String getDeclarationId() { return declarationId; }
-    public void setDeclarationId(String declarationId) { this.declarationId = declarationId; }
-}
-EOF
-
-############################################
-# model/ReceiveValidationResults.java
-############################################
-cat > $BASE/model/ReceiveValidationResults.java <<'EOF'
-package uk.gov.hmrc.rules.model;
-
-public class ReceiveValidationResults {
-    private String opId;
-    private boolean success;
-
-    public ReceiveValidationResults() {}
-
-    public ReceiveValidationResults(String opId, boolean success) {
-        this.opId = opId;
-        this.success = success;
-    }
-
-    public String getOpId() { return opId; }
-    public void setOpId(String opId) { this.opId = opId; }
-
-    public boolean isSuccess() { return success; }
-    public void setSuccess(boolean success) { this.success = success; }
-}
-EOF
-
-############################################
-# listener/RuleEventListener.java (stamps activation + firing; logs session id)
-############################################
-cat > $BASE/listener/RuleEventListener.java <<'EOF'
-package uk.gov.hmrc.rules.listener;
-
-import org.kie.api.event.rule.BeforeMatchFiredEvent;
-import org.kie.api.event.rule.DefaultAgendaEventListener;
-import org.kie.api.event.rule.MatchCreatedEvent;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import uk.gov.hmrc.rules.context.BatchContext;
-import uk.gov.hmrc.rules.context.BatchRegistry;
-
-public final class RuleEventListener extends DefaultAgendaEventListener {
-
-    private static final Logger log = LoggerFactory.getLogger(RuleEventListener.class);
-
-    private final BatchRegistry registry; // injected at service ctor
-    private final String opId;
-
-    public RuleEventListener(BatchRegistry registry, String opId) {
-        this.registry = registry;
-        this.opId = opId;
-    }
-
-    @Override
-    public void matchCreated(MatchCreatedEvent e) {
-        registry.get(opId).ifPresent(ctx -> {
-            ctx.setLastActivationRule(e.getMatch().getRule().getName());
-            ctx.setPhase(BatchContext.Phase.ACTIVATING);
-        });
-        // diag: session identity
-        int sid = System.identityHashCode(e.getKieRuntime());
-        log.debug("opId={} [ksession#{}] matchCreated rule={}", opId, sid, e.getMatch().getRule().getName());
-    }
-
-    @Override
-    public void beforeMatchFired(BeforeMatchFiredEvent e) {
-        registry.get(opId).ifPresent(ctx -> {
-            ctx.setCurrentRule(e.getMatch().getRule().getName());
-            ctx.setPhase(BatchContext.Phase.FIRING);
-        });
-        int sid = System.identityHashCode(e.getKieRuntime());
-        log.debug("opId={} [ksession#{}] beforeMatchFired rule={}", opId, sid, e.getMatch().getRule().getName());
-    }
-}
-EOF
-
-############################################
-# service/RulesService.java (logs session id; sets phases)
-############################################
-cat > $BASE/service/RulesService.java <<'EOF'
-package uk.gov.hmrc.rules.service;
-
-import org.kie.api.runtime.KieBase;
-import org.kie.api.runtime.KieSession;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
-import uk.gov.hmrc.rules.context.BatchContext;
-import uk.gov.hmrc.rules.context.BatchRegistry;
-import uk.gov.hmrc.rules.listener.RuleEventListener;
-import uk.gov.hmrc.rules.model.DeclarationValidationRequest;
-import uk.gov.hmrc.rules.model.ReceiveValidationResults;
-
-import java.util.concurrent.CompletableFuture;
-
-@Service
-public class RulesService {
-
-    private static final Logger log = LoggerFactory.getLogger(RulesService.class);
-
-    private final KieBase kieBase;
-    private final BatchRegistry registry;
-
-    public RulesService(KieBase kieBase, BatchRegistry registry) {
-        this.kieBase = kieBase;
-        this.registry = registry;
-    }
-
-    @Async("rulesExecutor")
-    public CompletableFuture<ReceiveValidationResults> executeRules(String opId,
-                                                                    DeclarationValidationRequest req) {
-        KieSession ks = null;
-        try {
-            ks = kieBase.newKieSession();
-            int sid = System.identityHashCode(ks);
-            log.debug("opId={} created KieSession [ksession#{}]", opId, sid);
-
-            // Phase hint after fact insertion (add your real inserts/globals where needed)
-            registry.get(opId).ifPresent(bc -> bc.setPhase(BatchContext.Phase.FACTS_INSERTED));
-
-            ks.addEventListener(new RuleEventListener(registry, opId));
-
-            ks.fireAllRules();
-
-            ReceiveValidationResults result = new ReceiveValidationResults(opId, true);
-            return CompletableFuture.completedFuture(result);
-
-        } finally {
-            if (ks != null) ks.dispose();
+    /** flip for violator logic in FOR_ALL */
+    public EnglishOperator flipped() {
+        switch (this) {
+            case LTE: return GT;
+            case LT:  return GTE;
+            case GTE: return LT;
+            case GT:  return LTE;
+            case EQ:  return NE;
+            case NE:  return EQ;
+            default:  throw new IllegalStateException("Unexpected op: " + this);
         }
     }
 }
 EOF
 
-############################################
-# web/RulesController.java (endpoint blocks; logs timeout diagnostics)
-############################################
-cat > $BASE/web/RulesController.java <<'EOF'
-package uk.gov.hmrc.rules.web;
+cat > "$SRC_DIR/ThenEmitter.java" <<'EOF'
+public class ThenEmitter {
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.web.bind.annotation.*;
-import uk.gov.hmrc.rules.context.*;
-import uk.gov.hmrc.rules.model.DeclarationValidationRequest;
-import uk.gov.hmrc.rules.model.ReceiveValidationResults;
-import uk.gov.hmrc.rules.service.RulesService;
+    // ===== PUBLIC BRANCHES =====
 
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-
-@RestController
-@RequestMapping("/api/rules")
-public class RulesController {
-
-    private static final Logger log = LoggerFactory.getLogger(RulesController.class);
-
-    private final RulesService rulesService;
-    private final BatchRegistry batchRegistry;
-
-    public RulesController(RulesService rulesService, BatchRegistry batchRegistry) {
-        this.rulesService = rulesService;
-        this.batchRegistry = batchRegistry;
+    /** IF/EXISTS anchor + bare refinement line (caller may append more constraints) */
+    public static String[] existsTwoLine(String fact) {
+        String anchor = "$match : " + fact + "( $seq : sequence )";
+        String dashed = "- " + fact + "( this == $match )";
+        return new String[]{ anchor, dashed };
     }
 
-    @PostMapping("/validate")
-    public ReceiveValidationResults validate(@RequestBody DeclarationValidationRequest req) throws Exception {
-        final long timeoutMs = 1500L;
+    /** THEN universal (“all … op V”) → 2 lines; dashed uses flipped operator (violator) */
+    public static String[] forAllTwoLine(String fact, String fieldPath, EnglishOperator originalOp, String valueLiteral) {
+        String anchor = "$match : " + fact + "( $seq : sequence )";
+        String guards = nullGuards(fieldPath);
+        String cmp    = bigDecCmp(fieldPath, originalOp.flipped(), valueLiteral);  // e.g., <= → >
+        String dashed = "- " + fact + "( this == $match, " + guards + ", " + cmp + " )";
+        return new String[]{ anchor, dashed };
+    }
 
-        String opId = UUID.randomUUID().toString();
-        String label = "DeclarationValidation";
-        BatchContext bc = batchRegistry.register(opId, label);
+    /** THEN prohibition (“none … with P”) → single not(...) */
+    public static String noneSingleLine(String fact, String innerConditionDsl) {
+        return "not( " + fact + "( " + innerConditionDsl + " ) )";
+    }
 
-        CompletableFuture<ReceiveValidationResults> cf = rulesService.executeRules(opId, req);
+    /** THEN exactly N → single accumulate with “!= N” (reversed to fire on violation) */
+    public static String exactlyNReversedSingleLine(String fact, String innerConditionDsl, int n) {
+        return "accumulate(\n" +
+               "  " + fact + "( " + innerConditionDsl + " ),\n" +
+               "  $cnt : count(1)\n" +
+               ") and eval( $cnt != " + n + " )";
+    }
 
-        try {
-            ReceiveValidationResults res = cf.get(timeoutMs, TimeUnit.MILLISECONDS);
-            boolean won = bc.tryComplete();
-            log.debug("opId={} complete {}", opId, won ? "WON" : "NO-OP");
-            return res;
+    // ===== INTERNAL HELPERS =====
 
-        } catch (java.util.concurrent.TimeoutException te) {
-            boolean won = bc.tryTimeout();
-            String rule = bc.ruleForDiagnostics();
-            BatchContext.Phase phase = bc.phase();
-            long elapsed = bc.elapsedMillis();
+    // a.b.c -> "a != null, a.b != null, a.b.c != null"
+    static String nullGuards(String path) {
+        String[] parts = path.split("\\.");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(String.join(".", java.util.Arrays.copyOfRange(parts, 0, i + 1))).append(" != null");
+        }
+        return sb.toString();
+    }
 
-            log.warn("opId={} TIMED OUT after {} ms (phase={}, rule={}) won={}",
-                    opId, elapsed, phase, rule, won ? "WON" : "NO-OP");
-
-            // best-effort stop
-            cf.cancel(true);
-            throw te;
-
-        } catch (java.util.concurrent.ExecutionException ee) {
-            Throwable root = (ee.getCause() != null) ? ee.getCause() : ee;
-            log.error("opId={} execution error {}", opId, root.toString(), root);
-            if (root instanceof RuntimeException re) throw re;
-            throw new RuntimeException(root);
-
-        } finally {
-            batchRegistry.remove(opId);
-            log.debug("opId={} registry entry removed", opId);
+    // BigDecimal compare mapping; no eval inside patterns
+    static String bigDecCmp(String fieldPath, EnglishOperator op, String val) {
+        String lhs = fieldPath + ".compareTo(new java.math.BigDecimal(\"" + val + "\"))";
+        switch (op) {
+            case LT:  return lhs + " < 0";
+            case LTE: return lhs + " <= 0";
+            case GT:  return lhs + " > 0";
+            case GTE: return lhs + " >= 0";
+            case EQ:  return lhs + " == 0";
+            case NE:  return lhs + " != 0";
+            default:  throw new IllegalArgumentException("Unsupported op: " + op);
         }
     }
 }
 EOF
 
-echo "✅ Files created/updated under $BASE"
+cat > "$SRC_DIR/AtomicHit.java" <<'EOF'
+/** Minimal DTO – adapt to your matcher’s actual output */
+public class AtomicHit {
+    private final String english;   // full English clause (e.g., "all ... less than or equal to 135")
+    private final String fact;      // e.g., "GoodsItemFacts"
+    private final String fieldPath; // e.g., "invoiceAmount.value" or "typeCode"
+    private final String value;     // e.g., "135" or "C676"
+
+    public AtomicHit(String english, String fact, String fieldPath, String value) {
+        this.english = english;
+        this.fact = fact;
+        this.fieldPath = fieldPath;
+        this.value = value;
+    }
+
+    public String english() { return english; }
+    public String fact() { return fact; }
+    public String fieldPath() { return fieldPath; }
+    public String value() { return value; }
+}
+EOF
+
+cat > "$SRC_DIR/CollectAll.java" <<'EOF'
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public class CollectAll {
+
+    /** Main entry: route each English clause to the correct emission */
+    public List<String> collectAll(List<AtomicHit> hits) {
+        List<String> out = new ArrayList<>();
+        for (AtomicHit h : hits) {
+            EnglishQuantifier q = EnglishQuantifier.fromText(h.english());
+
+            switch (q) {
+                case EXISTS: {
+                    // IF-side: two lines (anchor + dash). You can refine the dashed line later.
+                    String[] lines = ThenEmitter.existsTwoLine(h.fact());
+                    Collections.addAll(out, lines);
+                    break;
+                }
+                case FOR_ALL: {
+                    // THEN universal → two lines, dash uses reversed operator
+                    EnglishOperator op = EnglishOperator.fromText(h.english());
+                    String[] lines = ThenEmitter.forAllTwoLine(h.fact(), h.fieldPath(), op, h.value());
+                    Collections.addAll(out, lines);
+                    break;
+                }
+                case NONE: {
+                    // THEN prohibition → single not(...)
+                    String inner = buildInnerEquality(h.fieldPath(), h.value());
+                    out.add(ThenEmitter.noneSingleLine(h.fact(), inner));
+                    break;
+                }
+                case EXACTLY: {
+                    // THEN exactly N → single accumulate with "!= N"
+                    int n = EnglishQuantifier.extractExactlyN(h.english());
+                    String inner = buildInnerEquality(h.fieldPath(), h.value());
+                    out.add(ThenEmitter.exactlyNReversedSingleLine(h.fact(), inner, n));
+                    break;
+                }
+                case ATOMIC: {
+                    // Simple fallback single-line (rare)
+                    String inner = buildInnerEquality(h.fieldPath(), h.value());
+                    out.add(h.fact() + "( " + inner + " )");
+                    break;
+                }
+                default:
+                    throw new IllegalStateException("Unexpected quantifier: " + q);
+            }
+        }
+        return out;
+    }
+
+    // ----- helpers: guards + equality (string or numeric) -----
+    private String buildInnerEquality(String fieldPath, String value) {
+        boolean numeric = value != null && value.matches("-?\\d+(\\.\\d+)?");
+        String guards = nullGuards(fieldPath);
+        String v = numeric ? value : "\"" + value + "\"";
+        return guards + ", " + fieldPath + " == " + v;
+    }
+
+    private String nullGuards(String path) {
+        return ThenEmitter.nullGuards(path);
+    }
+}
+EOF
+
+cat > "$SRC_DIR/Demo.java" <<'EOF'
+import java.util.Arrays;
+import java.util.List;
+
+public class Demo {
+    public static void main(String[] args) {
+        CollectAll gen = new CollectAll();
+
+        // 1) THEN universal: "all invoiceAmounts <= 135" -> two lines; dashed uses '>' (reversed)
+        AtomicHit h1 = new AtomicHit(
+            "all goodsitem.invoiceAmount.value is less than or equal to 135",
+            "GoodsItemFacts",
+            "invoiceAmount.value",
+            "135"
+        );
+
+        // 2) THEN exactly one: "exactly one ... == C676" -> single accumulate with '!= 1'
+        AtomicHit h2 = new AtomicHit(
+            "exactly one GoodsItem with type code equals C676",
+            "GoodsItemFacts",
+            "typeCode",
+            "C676"
+        );
+
+        // 3) THEN none: "none of the GoodsItem have type code 999" -> single not(...)
+        AtomicHit h3 = new AtomicHit(
+            "none of the GoodsItem have type code equals 999",
+            "GoodsItemFacts",
+            "typeCode",
+            "999"
+        );
+
+        List<String> out = gen.collectAll(Arrays.asList(h1, h2, h3));
+
+        System.out.println("=== GENERATED WHEN LINES ===");
+        for (String line : out) {
+            System.out.println(line);
+        }
+
+        // Expected highlights:
+        // - For h1 you should see:
+        //   $match : GoodsItemFacts( $seq : sequence )
+        //   - GoodsItemFacts( this == $match, invoiceAmount != null, invoiceAmount.value != null,
+        //                     invoiceAmount.value.compareTo(new java.math.BigDecimal("135")) > 0 )
+        //
+        // - For h2 you should see an accumulate with '!= 1'
+        // - For h3 you should see: not( GoodsItemFacts( typeCode != null, typeCode == "999" ) )
+    }
+}
+EOF
+
+########################################################################
+# Compile and run
+########################################################################
+echo "Compiling..."
+(
+  cd "$SRC_DIR"
+  javac *.java
+)
+
+echo "Running demo..."
+(
+  cd "$SRC_DIR"
+  java Demo
+)
+
+echo ""
+echo "Done. Files in: $SRC_DIR"
+echo "Tip: edit Demo.java to add more English clauses and re-run."
