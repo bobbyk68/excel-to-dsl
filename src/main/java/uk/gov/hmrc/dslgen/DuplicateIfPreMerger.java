@@ -41,6 +41,34 @@ public final class DuplicateIfPreMerger {
         return new Result(new java.util.ArrayList<>(keeperByIf.values()), removed);
     }
 
+    private static String extractListPrefix(String rawThen) {
+        if (rawThen == null) return "";
+        String s = normalize(stripSmartQuotes(rawThen));
+
+        // Search for the last of these pivots so we keep the natural phrase
+        String[] pivots = { " equals ", " must equals ", " in ", " with ", " to " };
+        int bestPos = -1; String best = null;
+        for (String p : pivots) {
+            int pos = s.toLowerCase().lastIndexOf(p.trim().toLowerCase());
+            if (pos >= 0 && pos >= bestPos) {
+                bestPos = pos;
+                best = p;
+            }
+        }
+        if (bestPos >= 0 && best != null) {
+            // include the pivot and trailing space
+            int end = bestPos + best.trim().length();
+            // ensure one space after the pivot
+            String head = s.substring(0, end).trim() + " ";
+            return head;
+        }
+
+        // Fallback: keep everything up to the last space, then a single space.
+        int lastSpace = s.lastIndexOf(' ');
+        return (lastSpace > 0 ? s.substring(0, lastSpace) : s) + " ";
+    }
+
+
     // --- THEN code extractor ---
     // Handles: "only one VG1" -> VG1; "only in VG1,V,CX" -> VG1,V,CX; "allowed in A1" -> A1; parentheses/quotes ok.
     private static java.util.List<String> extractThenCodes(String rawThen) {
