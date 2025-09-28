@@ -1,0 +1,23 @@
+# Join word and message prefix (both optional; these are your current preferences)
+joinWord: and
+prefix: validation error for
+
+# Patterns are matched in order. The first match that applies adds its tag.
+# type: prefix | contains     (default = prefix)
+patterns:
+  - match: goods item with special procedure
+    tag: special procedure
+    type: prefix
+
+  - match: no matching goods item with additional information
+    tag: no additional information
+    type: prefix
+
+  # Add more here as you go:
+  # - match: invoice amount
+  #   tag: invoice amount
+  #   type: prefix
+
+  # - match: declared duty tax fee
+  #   tag: duty tax fee
+  #   type: prefix
