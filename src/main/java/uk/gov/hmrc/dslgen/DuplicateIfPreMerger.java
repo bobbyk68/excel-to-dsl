@@ -1,139 +1,341 @@
 package uk.gov.hmrc.dslgen;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Pre-merge step:
+ *  - Groups rows by composite key: (IF condition + procedureCategory + declarationType)
+ *  - Keeps the FIRST row per key (stable order thanks to LinkedHashMap)
+ *  - Collects values from THEN across duplicates and writes merged CSV back to the kept row
+ *  - Builds human-readable summaries (including kept id and merged ids)
+ *
+ * Assumptions about RuleRow (matching your current class):
+ *  - id()                       : String
+ *  - ifCondition()              : String     (raw/English IF)
+ *  - thenCondition()            : String     (raw/English THEN)
+ *  - declarationType()          : List<String>
+ *  - procedureCategory()        : List<String>
+ *  - ensureMergedThenCodes()    : void
+ *  - mergedThenCodes()          : List<String>
+ *  - setMergedThenCodes(List<String>) / setMergedThenCodesCsv(String) / mergedThenCodesCsv() : String
+ *  - setCombinedThenCondition(String) / combinedThenCondition() : String
+ */
 public final class DuplicateIfPreMerger {
 
-    public static Result mergeByRawIf(java.util.List<RuleRow> rows) {
-        java.util.Map<String, RuleRow> keeperByIf = new java.util.LinkedHashMap<>();
-        java.util.Map<String, java.util.LinkedHashSet<String>> codesByIf = new java.util.HashMap<>();
-        java.util.List<RuleRow> removed = new java.util.ArrayList<>();
+    /**
+     * Run this right after ExcelReader.read(...) and before collectAll(...).
+     *
+     * @param rows all RuleRow objects read from Excel (not null; may be empty)
+     * @return Result:
+     *         - kept():     de-duplicated list (first occurrence per composite key), mutated with merged THEN data
+     *         - removed():  duplicates dropped
+     *         - summaries(): one summary per composite key that had duplicates (kept id + merged ids + THENs)
+     */
+    public static Result mergeByCompositeKey(List<RuleRow> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return new Result(List.of(), List.of(), List.of());
+        }
 
+        // --- CORE STATE -------------------------------------------------------
+        // Keep FIRST row per composite key (insertion order preserved)
+        Map<String, RuleRow> keeperByKey = new LinkedHashMap<>();
+        // Distinct THEN codes per key (ordered by discovery)
+        Map<String, LinkedHashSet<String>> codesByKey = new HashMap<>();
+        // Original THEN strings encountered per key (for summary)
+        Map<String, List<String>> originalThensByKey = new HashMap<>();
+        // Occurrence count per key (to detect duplicates)
+        Map<String, Integer> countByKey = new HashMap<>();
+        // Track IDs merged into the kept row per key (not including the kept id)
+        Map<String, List<String>> mergedIdsByKey = new HashMap<>();
+
+        List<RuleRow> removed = new ArrayList<>();
+
+        // === PASS 1: scan all rows, choose keeper, collect data ===============
         for (RuleRow row : rows) {
-            String ifKey = normalize(row.ifCondition()); // KEY = full raw IF (incl. value)
+            if (row == null) continue;
 
-            RuleRow keeper = keeperByIf.get(ifKey);
+            // Build composite key: IF + CATS + TYPES (normalized & order-insensitive for lists)
+            final String key = buildCompositeKey(row);
+
+            countByKey.merge(key, 1, Integer::sum);
+
+            RuleRow keeper = keeperByKey.get(key);
             if (keeper == null) {
-                keeper = row;                     // keep FIRST occurrence
+                // First time we see this key → keep THIS instance
+                keeper = row;
                 keeper.ensureMergedThenCodes();
-                keeperByIf.put(ifKey, keeper);
-                codesByIf.put(ifKey, new java.util.LinkedHashSet<>());
+                keeperByKey.put(key, keeper);
+                codesByKey.put(key, new LinkedHashSet<>());
+                mergedIdsByKey.put(key, new ArrayList<>()); // start empty list
             } else {
-                removed.add(row);                 // mark duplicate for removal
+                // Duplicate for this key → mark as removed and store its id
+                removed.add(row);
+                mergedIdsByKey.get(key).add(safe(row.id()));
             }
 
-            // Extract code(s) from the raw Excel THEN text and collect them
-            for (String code : extractThenCodes(row.thenCondition())) {
-                if (!code.isBlank()) codesByIf.get(ifKey).add(code);
+            // Collect original THEN for summary
+            originalThensByKey.computeIfAbsent(key, k -> new ArrayList<>())
+                    .add(safe(row.thenCondition()));
+
+            // Collect code-like tokens from THEN for merging (handles alpha-numeric & numeric)
+            for (String code : extractThenCodes(safe(row.thenCondition()))) {
+                if (!code.isBlank()) {
+                    codesByKey.get(key).add(code);
+                }
             }
         }
 
-        // Write merged codes back to the kept rows
-        for (java.util.Map.Entry<String, RuleRow> e : keeperByIf.entrySet()) {
-            java.util.LinkedHashSet<String> uniq = codesByIf.get(e.getKey());
-            java.util.List<String> merged = new java.util.ArrayList<>();
-            if (uniq != null) merged.addAll(uniq);
+        // === PASS 2: write merged data into keeper rows + build summaries =====
+        List<MergeSummaryEntry> summaries = new ArrayList<>();
 
-            RuleRow r = e.getValue();
-            r.mergedThenCodes().clear();
-            r.mergedThenCodes().addAll(merged);
-            r.setMergedThenCodesCsv(String.join(",", merged)); // e.g., "A1,A2,A7"
+        for (Map.Entry<String, RuleRow> e : keeperByKey.entrySet()) {
+            final String key = e.getKey();
+            final RuleRow kept = e.getValue();
+
+            // Distinct THEN values merged (if any)
+            LinkedHashSet<String> uniq = codesByKey.getOrDefault(key, new LinkedHashSet<>());
+            List<String> mergedVals = new ArrayList<>(uniq);
+
+            // Write merged values to the kept row
+            kept.mergedThenCodes().clear();
+            kept.mergedThenCodes().addAll(mergedVals);
+            final String csv = String.join(",", mergedVals);
+            kept.setMergedThenCodesCsv(csv);
+
+            // Combined THEN: only build when there are >= 2 distinct values;
+            // otherwise leave null so downstream emits the original THEN verbatim.
+            if (mergedVals.size() >= 2) {
+                final String prefix = extractListPrefix(safe(kept.thenCondition())); // e.g. "must equals "
+                kept.setCombinedThenCondition(prefix + csv);
+            } else {
+                kept.setCombinedThenCondition(null);
+            }
+
+            // Build a summary ONLY if there were duplicates for this key
+            final int occ = countByKey.getOrDefault(key, 1);
+            if (occ > 1) {
+                final List<String> originals = originalThensByKey.getOrDefault(key, List.of());
+                final String finalThen = (kept.combinedThenCondition() != null && !kept.combinedThenCondition().isBlank())
+                        ? kept.combinedThenCondition()
+                        : kept.thenCondition(); // fallback: no real merge → show original THEN
+
+                final String keptId = safe(kept.id());
+                final List<String> mergedIds = mergedIdsByKey.getOrDefault(key, List.of());
+
+                summaries.add(new MergeSummaryEntry(
+                        keptId,
+                        kept.ifCondition(),
+                        normalizeListForReport(kept.procedureCategory()),
+                        normalizeListForReport(kept.declarationType()),
+                        originals,
+                        finalThen,
+                        new ArrayList<>(mergedIds)
+                ));
+            }
         }
 
-        return new Result(new java.util.ArrayList<>(keeperByIf.values()), removed);
+        return new Result(new ArrayList<>(keeperByKey.values()), removed, summaries);
     }
 
+    // ========================================================================
+    // =========================== KEY BUILDING ================================
+    // ========================================================================
+
+    /**
+     * Composite merge key = IF + normalized(procedureCategory) + normalized(declarationType)
+     * - IF is trimmed and internal whitespace collapsed
+     * - CATS / TYPES are uppercased, trimmed, deduped, sorted for stable equality (order-insensitive)
+     */
+    private static String buildCompositeKey(RuleRow row) {
+        String ifPart   = normalize(safe(row.ifCondition()));
+        String catsPart = joinNormalizedList(row.procedureCategory());
+        String typePart = joinNormalizedList(row.declarationType());
+        return ifPart + " | CATS=" + catsPart + " | TYPES=" + typePart;
+    }
+
+    private static String joinNormalizedList(List<String> list) {
+        if (list == null || list.isEmpty()) return "";
+        // Uppercase, trim, dedupe, sort
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+        for (String s : list) {
+            String t = normalizeToken(s);
+            if (!t.isBlank()) set.add(t);
+        }
+        // Sort for order-insensitive equality
+        List<String> sorted = new ArrayList<>(set);
+        sorted.sort(String::compareTo);
+        return String.join(",", sorted);
+    }
+
+    private static String normalizeToken(String s) {
+        if (s == null) return "";
+        return s.trim().toUpperCase(Locale.ROOT).replaceAll("\\s+", " ");
+    }
+
+    private static String normalize(String s) {
+        if (s == null) return "";
+        return s.trim().replaceAll("\\s+", " ");
+    }
+
+    private static String safe(String s) {
+        return s == null ? "" : s;
+    }
+
+    // ========================================================================
+    // ============================ THEN PARSING ===============================
+    // ========================================================================
+
+    /**
+     * One-pass code extractor that matches:
+     *  - Alpha-numeric codes (e.g., GEN36, D05, VG1, ABC-123, A1_B2)
+     *  - Pure numbers (e.g., 0, 10, 999)
+     *
+     * It does NOT match normal words ("at", "least", etc.) because we uppercase
+     * and require the token to start with [A-Z0-9] and then contain only [A-Z0-9_-].
+     */
+    private static List<String> extractThenCodes(String rawThen) {
+        if (rawThen == null || rawThen.isBlank()) return List.of();
+        Pattern p = Pattern.compile("\\b[A-Z0-9][A-Z0-9_-]*\\b");
+        Matcher m = p.matcher(rawThen.toUpperCase(Locale.ROOT));
+        LinkedHashSet<String> out = new LinkedHashSet<>();
+        while (m.find()) out.add(m.group());
+        return new ArrayList<>(out);
+    }
+
+    /**
+     * Preserve the natural phrase before the value-list in THEN, e.g.:
+     *  "must equals ", "in ", "with ", "to "
+     * If not found, returns everything up to the last space, plus a space.
+     */
     private static String extractListPrefix(String rawThen) {
-        if (rawThen == null) return "";
-        String s = normalize(stripSmartQuotes(rawThen));
+        final String s = normalize(safe(rawThen));
+        final String lower = s.toLowerCase();
 
-        // Search for the last of these pivots so we keep the natural phrase
-        String[] pivots = { " equals ", " must equals ", " in ", " with ", " to " };
-        int bestPos = -1; String best = null;
+        final String[] pivots = { " must equals ", " equals ", " only in ", " in ", " with ", " to ", ":" };
+
+        int bestPos = -1;
+        int bestLen = 0;
         for (String p : pivots) {
-            int pos = s.toLowerCase().lastIndexOf(p.trim().toLowerCase());
-            if (pos >= 0 && pos >= bestPos) {
+            int pos = lower.lastIndexOf(p.trim());
+            if (pos >= 0 && pos > bestPos) {
                 bestPos = pos;
-                best = p;
+                bestLen = p.equals(":") ? 1 : p.trim().length();
             }
         }
-        if (bestPos >= 0 && best != null) {
-            // include the pivot and trailing space
-            int end = bestPos + best.trim().length();
-            // ensure one space after the pivot
-            String head = s.substring(0, end).trim() + " ";
-            return head;
+
+        if (bestPos >= 0) {
+            String head = s.substring(0, bestPos + bestLen).trim();
+            return head.endsWith(" ") ? head : head + " ";
         }
 
-        // Fallback: keep everything up to the last space, then a single space.
-        int lastSpace = s.lastIndexOf(' ');
-        return (lastSpace > 0 ? s.substring(0, lastSpace) : s) + " ";
+        int last = s.lastIndexOf(' ');
+        return (last > 0 ? s.substring(0, last) : s) + " ";
     }
 
+    // ========================================================================
+    // ============================ RESULT TYPES ===============================
+    // ========================================================================
 
-    // --- THEN code extractor ---
-    // Handles: "only one VG1" -> VG1; "only in VG1,V,CX" -> VG1,V,CX; "allowed in A1" -> A1; parentheses/quotes ok.
-    private static java.util.List<String> extractThenCodes(String rawThen) {
-        if (rawThen == null) return java.util.List.of();
-        String s = normalize(stripSmartQuotes(rawThen));
-
-        int pIn = lastIndexIgnoreCase(s, " in ");
-        int pTo = lastIndexIgnoreCase(s, " to ");
-        int pWith = lastIndexIgnoreCase(s, " with ");
-        int pivot = Math.max(pIn, Math.max(pTo, pWith));
-
-        String tail = (pivot >= 0) ? s.substring(pivot + 4).trim() : s;
-        if (tail.startsWith("(") && tail.endsWith(")") && tail.length() >= 2) {
-            tail = tail.substring(1, tail.length() - 1).trim();
-        }
-
-        if (tail.contains(",")) {
-            String[] parts = tail.split("\\s*,\\s*");
-            java.util.List<String> out = new java.util.ArrayList<>(parts.length);
-            for (String p : parts) {
-                String t = sanitize(stripQuotes(p));
-                if (!t.isBlank()) out.add(t);
-            }
-            return out;
-        }
-
-        String token = sanitize(stripQuotes(lastCodeLikeToken(tail)));
-        if (token.isBlank()) token = sanitize(stripQuotes(lastCodeLikeToken(s)));
-        return token.isBlank() ? java.util.List.of() : java.util.List.of(token);
-    }
-
-    // --- helpers ---
-    private static String normalize(String s) { return s == null ? "" : s.trim().replaceAll("\\s+", " "); }
-    private static String stripQuotes(String s) {
-        String t = s.trim();
-        if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith("\"") && t.endsWith("\""))) {
-            return t.substring(1, t.length() - 1).trim();
-        }
-        return t;
-    }
-    private static String stripSmartQuotes(String s) {
-        return s.replace('‘','\'').replace('’','\'').replace('“','"').replace('”','"');
-    }
-    private static String lastCodeLikeToken(String s) {
-        String[] parts = s.trim().split("\\s+");
-        for (int i = parts.length - 1; i >= 0; i--) {
-            String t = sanitize(parts[i]);
-            if (!t.isBlank()) return t;
-        }
-        return "";
-    }
-    private static String sanitize(String token) { return token.replaceAll("[^A-Za-z0-9_-]", ""); }
-    private static int lastIndexIgnoreCase(String s, String needle) { return s.toLowerCase().lastIndexOf(needle.trim().toLowerCase()); }
-
-    private DuplicateIfPreMerger() {}
-
+    /**
+     * Result of the pre-merge step.
+     */
     public static final class Result {
-        private final java.util.List<RuleRow> kept;     // unique IF rows (first occurrence, mutated)
-        private final java.util.List<RuleRow> removed;  // duplicates (dropped)
+        private final List<RuleRow> kept;                 // first-per-key rows (mutated with merged THEN)
+        private final List<RuleRow> removed;              // duplicates dropped
+        private final List<MergeSummaryEntry> summaries;  // summaries for keys that had duplicates
 
-        public Result(java.util.List<RuleRow> kept, java.util.List<RuleRow> removed) {
+        public Result(List<RuleRow> kept, List<RuleRow> removed, List<MergeSummaryEntry> summaries) {
             this.kept = kept;
             this.removed = removed;
+            this.summaries = summaries;
         }
-        public java.util.List<RuleRow> kept() { return kept; }
-        public java.util.List<RuleRow> removed() { return removed; }
+
+        public List<RuleRow> kept() { return kept; }
+        public List<RuleRow> removed() { return removed; }
+        public List<MergeSummaryEntry> summaries() { return summaries; }
     }
+
+    /**
+     * Summary entry for one composite key that had duplicates.
+     * Includes kept id, IF, CATS, TYPES, all original THENs, final merged THEN, and merged ids.
+     */
+    public static final class MergeSummaryEntry {
+        private final String keptId;                 // e.g., "BR675_..."
+        private final String ifCondition;            // IF text
+        private final List<String> procedureCategory;// normalized cats (sorted, deduped)
+        private final List<String> declarationType;  // normalized types (sorted, deduped)
+        private final List<String> originalThens;    // original THENs encountered
+        private final String mergedThen;             // final THEN used
+        private final List<String> mergedIds;        // ids merged into keptId
+
+        public MergeSummaryEntry(String keptId,
+                                 String ifCondition,
+                                 List<String> procedureCategory,
+                                 List<String> declarationType,
+                                 List<String> originalThens,
+                                 String mergedThen,
+                                 List<String> mergedIds) {
+            this.keptId = keptId;
+            this.ifCondition = ifCondition;
+            this.procedureCategory = procedureCategory;
+            this.declarationType = declarationType;
+            this.originalThens = originalThens;
+            this.mergedThen = mergedThen;
+            this.mergedIds = mergedIds;
+        }
+
+        public String keptId() { return keptId; }
+        public String ifCondition() { return ifCondition; }
+        public List<String> procedureCategory() { return procedureCategory; }
+        public List<String> declarationType() { return declarationType; }
+        public List<String> originalThens() { return originalThens; }
+        public String mergedThen() { return mergedThen; }
+        public List<String> mergedIds() { return mergedIds; }
+
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+            sb.append("Kept ID: ").append(keptId).append('\n');
+            sb.append("IF: ").append(ifCondition).append('\n');
+            sb.append("CATS: ").append(String.join(",", procedureCategory)).append('\n');
+            sb.append("TYPES: ").append(String.join(",", declarationType)).append('\n');
+            sb.append("  Originals (THEN):\n");
+            for (String t : originalThens) {
+                sb.append("    - ").append(t).append('\n');
+            }
+            sb.append("  Merged THEN: ").append(mergedThen).append('\n');
+            if (!mergedIds.isEmpty()) {
+                sb.append("  Merged IDs: ").append(String.join(", ", mergedIds)).append('\n');
+            } else {
+                sb.append("  Merged IDs: (none)\n");
+            }
+            return sb.toString();
+        }
+    }
+
+    // ========================================================================
+    // ============================== REPORT HELPERS ===========================
+    // ========================================================================
+
+    private static List<String> normalizeListForReport(List<String> list) {
+        if (list == null || list.isEmpty()) return List.of();
+        LinkedHashSet<String> set = new LinkedHashSet<>();
+        for (String s : list) {
+            String t = normalizeToken(s);
+            if (!t.isBlank()) set.add(t);
+        }
+        List<String> out = new ArrayList<>(set);
+        out.sort(String::compareTo);
+        return out;
+    }
+
+    private DuplicateIfPreMerger() {}
 }
