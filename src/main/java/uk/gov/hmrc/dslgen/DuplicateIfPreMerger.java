@@ -201,14 +201,77 @@ public final class DuplicateIfPreMerger {
      * It does NOT match normal words ("at", "least", etc.) because we uppercase
      * and require the token to start with [A-Z0-9] and then contain only [A-Z0-9_-].
      */
-    private static List<String> extractThenCodes(String rawThen) {
-        if (rawThen == null || rawThen.isBlank()) return List.of();
-        Pattern p = Pattern.compile("\\b[A-Z0-9][A-Z0-9_-]*\\b");
-        Matcher m = p.matcher(rawThen.toUpperCase(Locale.ROOT));
-        LinkedHashSet<String> out = new LinkedHashSet<>();
-        while (m.find()) out.add(m.group());
-        return new ArrayList<>(out);
+// Extract all value tokens from a THEN string.
+// Strategy:
+//   1) Slice to the "tail" after the last pivot (equals/greater than/less than/in/with/to/:)
+//   2) Split the tail on commas / "and" / "or"
+//   3) Clean and filter tokens to keep only codes/numbers; drop normal words.
+    private static java.util.List<String> extractThenCodes(String rawThen) {
+        if (rawThen == null || rawThen.isBlank()) return java.util.List.of();
+
+        // --- 1) Slice to tail after last pivot ---
+        String s = rawThen.trim();
+        String upper = s.toUpperCase(java.util.Locale.ROOT);
+
+        // Regex: capture everything AFTER the last pivot into group(1)
+        java.util.regex.Pattern tailPat = java.util.regex.Pattern.compile(
+                ".*(?:\\bEQUALS\\b|\\bGREATER\\s+THAN\\b|\\bLESS\\s+THAN\\b|\\bONLY\\s+IN\\b|\\bIN\\b|\\bWITH\\b|\\bTO\\b|:)\\s*(.+)$",
+                java.util.regex.Pattern.CASE_INSENSITIVE
+        );
+        java.util.regex.Matcher tm = tailPat.matcher(upper);
+        String tail = tm.matches() ? s.substring(s.length() - (upper.length() - tm.group(1).length())).trim()
+                : s; // if no pivot, fall back to whole string
+
+        // strip surrounding parentheses in the tail
+        if (tail.startsWith("(") && tail.endsWith(")") && tail.length() > 2) {
+            tail = tail.substring(1, tail.length() - 1).trim();
+        }
+
+        // --- 2) Normalise separators and split ---
+        String norm = tail
+                .replace('，', ',')                 // full-width comma
+                .replace(';', ',')                  // semicolons → comma
+                .replaceAll("(?i)\\s+(AND|OR)\\s+", ",") // 'and'/'or' → comma
+                .replaceAll("\\s+", " ")            // collapse spaces
+                .trim();
+
+        String[] parts = norm.split("\\s*,\\s*");
+
+        // --- 3) Clean + filter tokens ---
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        java.util.Set<String> stop = java.util.Set.of(
+                "AT","IS","OF","ONE","ONLY","IN","WITH","TO","MUST","EQUALS","GREATER","LESS","THAN","AND","OR"
+        );
+
+        for (String part : parts) {
+            String tok = part.trim();
+            if (tok.isEmpty()) continue;
+
+            // Remove surrounding quotes and stray punctuation
+            if ((tok.startsWith("'") && tok.endsWith("'")) || (tok.startsWith("\"") && tok.endsWith("\""))) {
+                tok = tok.substring(1, tok.length() - 1).trim();
+            }
+            // Keep only A-Z / 0-9 / _ / - inside the token
+            tok = tok.replaceAll("[^A-Za-z0-9_-]", "");
+
+            String up = tok.toUpperCase(java.util.Locale.ROOT);
+            if (up.isEmpty() || stop.contains(up)) continue;
+
+            // Accept if:
+            //  - pure number, or
+            //  - letters+at least one digit (e.g., C01, N934, GEN36), or
+            //  - 1–2 letters only (e.g., V, CX)
+            boolean ok =
+                    up.matches("\\d+") ||
+                            up.matches("[A-Z]+\\d[A-Z0-9_-]*") ||
+                            up.matches("[A-Z]{1,2}");
+
+            if (ok) out.add(up);
+        }
+
+        return new java.util.ArrayList<>(out); // distinct, in original order
     }
+
 
     /**
      * Preserve the natural phrase before the value-list in THEN, e.g.:
