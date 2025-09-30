@@ -20,7 +20,6 @@ public void collectAll(List<RuleRow> rows, DslWriter dsl) {
     }
 }
 
-
 // Minimal post-compose fold for GoodsItem.additionalDocuments.* using raw IF/THEN strings only.
 private void emitAdditionalDocsQuick(RuleRow row, DslWriter dsl) {
     String ifText   = safe(row.ifCondition());
