@@ -1,0 +1,317 @@
+private void emitCoalescedIfThen(HyphenTwoPhaseComposer composer,
+                                 ConstraintCase kase,
+                                 AtomicHit ifHit,
+                                 AtomicHit thenHit,
+                                 RuleRow row,
+                                 DslWriter dsl) {
+
+    // 1) detect merge
+    var orig   = new java.util.LinkedHashSet<>(extractThenCodes(row.thenCondition()));
+    var merged = new java.util.LinkedHashSet<>(row.mergedThenCodes());
+    boolean hasMerged = row.mergeGroupSize() > 1 && !merged.equals(orig);
+    String csv = row.mergedThenCodesCsv();
+
+    // 2) buffer the raw lines (IF positive, THEN always negated)
+    java.util.List<DashLine> buf = new java.util.ArrayList<>();
+    if (ifHit != null) {
+        for (AtomicHit h : ifHit.groupsList) {
+            buf.add(new DashLine(DashLine.Role.IF, rootOf(h.path()), keyOf(h.path()),
+                                 dashTemplateFor(h.template), new java.util.ArrayList<>(h.groups), false));
+        }
+    }
+    if (thenHit != null) {
+        for (AtomicHit h : thenHit.groupsList) {
+            buf.add(new DashLine(DashLine.Role.THEN, rootOf(h.path()), keyOf(h.path()),
+                                 dashTemplateFor(h.template), new java.util.ArrayList<>(h.groups), true));
+        }
+    }
+
+    // 3) coalesce by root+key+polarity
+    java.util.Map<String, java.util.Map<String, java.util.Map<Boolean, java.util.LinkedHashSet<String>>>> vals =
+        new java.util.LinkedHashMap<>();
+    for (DashLine dl : buf) {
+        vals.computeIfAbsent(dl.root, r -> new java.util.LinkedHashMap<>())
+            .computeIfAbsent(dl.key,  k -> new java.util.LinkedHashMap<>())
+            .computeIfAbsent(dl.negated, p -> new java.util.LinkedHashSet<>());
+        String value = dl.groups.isEmpty() ? "" : dl.groups.get(dl.groups.size()-1);
+        if (dl.role == DashLine.Role.THEN && hasMerged && csv != null && !csv.isBlank()) value = csv;
+        if (!value.isBlank()) vals.get(dl.root).get(dl.key).get(dl.negated).add(value);
+    }
+
+    // 4) emit IF block(s): header + dashes
+    for (var eRoot : vals.entrySet()) {
+        dsl.writeln("when");
+        dsl.writeln("  " + headerForRoot(eRoot.getKey()));
+
+        for (var eKey : eRoot.getValue().entrySet()) {
+            var posVals = eKey.getValue().get(Boolean.FALSE);
+            if (posVals != null && !posVals.isEmpty()) {
+                emitDash(composer, kase, dsl, dashTemplateFor("with " + eKey.getKey() + " equals {1}"),
+                         String.join(",", posVals), false);
+            }
+            var negVals = eKey.getValue().get(Boolean.TRUE);
+            if (negVals != null && !negVals.isEmpty()) {
+                emitDash(composer, kase, dsl, dashTemplateFor("with " + eKey.getKey() + " equals {1}"),
+                         String.join(",", negVals), true);
+            }
+        }
+    }
+
+    // 5) THEN header only
+    if (thenHit != null) {
+        var thenHeader = composer.composeEnglish(HyphenTwoPhaseComposer.Role.THEN, kase,
+                                                 thenHit.template, thenHit.groups, null);
+        dsl.writeln("then");
+        dsl.writeln("  " + thenHeader.english());
+    }
+}
+
+
+// --- tiny helpers ---
+private static boolean isAdditionalDocs(String path) {
+    return path != null && path.startsWith("GoodsItem.additionalDocuments.");
+}
+private static String dashKeyOf(String path) { // leaf after last dot
+    if (path == null) return "";
+    int i = path.lastIndexOf('.');
+    return i > 0 ? path.substring(i + 1) : path; // "code"
+}
+private static String negateDashTemplate(String dash) {
+    if (dash == null) return "without {1}";
+    String t = dash;
+    t = t.replace(" equals ", " not equals ")
+         .replace(" is in ",  " is not in ")
+         .replace(" in ",     " not in ");
+    if (t.toLowerCase().startsWith("with ")) t = "without " + t.substring(5);
+    if (!t.toLowerCase().contains(" not ") && !t.toLowerCase().startsWith("without "))
+        t = t.replace("{1}", "not {1}");
+    return t;
+}
+// The extractor you already trust
+private static java.util.List<String> extractThenCodes(String rawThen) {
+    if (rawThen == null || rawThen.isBlank()) return java.util.List.of();
+    java.util.regex.Matcher m = java.util.regex.Pattern
+        .compile("\\b[A-Z0-9][A-Za-z0-9_-]*\\b")
+        .matcher(rawThen.toUpperCase(java.util.Locale.ROOT));
+    java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+    while (m.find()) out.add(m.group());
+    return new java.util.ArrayList<>(out);
+}
+
+// Compose IF & THEN as usual, but don't print their child/dash lines.
+// Instead, fold the 4 lines (2 IF + 2 THEN) into: 1 header + 2 dashes (THEN dash is negated).
+private void emitAdditionalDocs_CoalescedAfterCompose(
+        HyphenTwoPhaseComposer composer,
+        ConstraintCase kase,
+        AtomicHit ifHit,
+        AtomicHit thenHit,
+        RuleRow row,
+        DslWriter dsl) {
+
+    // True merge check
+    var orig   = new java.util.LinkedHashSet<>(extractThenCodes(row.thenCondition()));
+    var merged = new java.util.LinkedHashSet<>(row.mergedThenCodes());
+    boolean hasMerged = row.mergeGroupSize() > 1 && !merged.equals(orig);
+    String csv = row.mergedThenCodesCsv();
+
+    // Buffer values per dash key and polarity (pos = IF, neg = THEN)
+    java.util.Map<String, java.util.LinkedHashSet<String>> pos = new java.util.LinkedHashMap<>();
+    java.util.Map<String, java.util.LinkedHashSet<String>> neg = new java.util.LinkedHashMap<>();
+
+    // IF side (positive)
+    if (ifHit != null && ifHit.groupsList != null) {
+        for (AtomicHit h : ifHit.groupsList) {
+            if (!isAdditionalDocs(h.path())) continue;
+            String key = dashKeyOf(h.path());
+            String val = h.groups.isEmpty() ? "" : h.groups.get(h.groups.size() - 1);
+            if (!val.isBlank()) pos.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>()).add(val);
+        }
+    }
+
+    // THEN side (always negated for your domain)
+    if (thenHit != null && thenHit.groupsList != null) {
+        for (AtomicHit h : thenHit.groupsList) {
+            if (!isAdditionalDocs(h.path())) continue;
+            String key = dashKeyOf(h.path());
+            String val = h.groups.isEmpty() ? "" : h.groups.get(h.groups.size() - 1);
+            if (hasMerged && csv != null && !csv.isBlank()) val = csv; // apply merged CSV
+            if (!val.isBlank()) neg.computeIfAbsent(key, k -> new java.util.LinkedHashSet<>()).add(val);
+        }
+    }
+
+    if (pos.isEmpty() && neg.isEmpty()) return; // nothing to fold
+
+    // Emit once: header + positive dash + negative dash
+    dsl.writeln("when");
+    dsl.writeln("  Goods item with additional documents exists");
+
+    // positive dashes
+    for (var e : pos.entrySet()) {
+        String mergedCsv = String.join(",", e.getValue());
+        String dash = "with " + e.getKey().replace('_',' ') + " equals {1}";
+        var res = composer.composeEnglish(HyphenTwoPhaseComposer.Role.IF, kase, dash, java.util.List.of(mergedCsv), null);
+        dsl.writeln("  - " + res.english());
+    }
+
+    // negative dashes (from THEN)
+    for (var e : neg.entrySet()) {
+        String mergedCsv = String.join(",", e.getValue());
+        String dash = "with " + e.getKey().replace('_',' ') + " equals {1}";
+        String negDash = negateDashTemplate(dash);
+        var res = composer.composeEnglish(HyphenTwoPhaseComposer.Role.IF, kase, negDash, java.util.List.of(mergedCsv), null);
+        dsl.writeln("  - " + res.english());
+    }
+
+    // THEN header (your normal single line)
+    if (thenHit != null) {
+        var thenHeader = composer.composeEnglish(HyphenTwoPhaseComposer.Role.THEN, kase, thenHit.template, thenHit.groups, null);
+        dsl.writeln("then");
+        dsl.writeln("  " + thenHeader.english());
+    }
+}
+
+
+AtomicHit ifHit   = matcher.matchIf(row.ifCondition());
+AtomicHit thenHit = matcher.matchThen(row.thenCondition());
+ConstraintCase kase = ConstraintCase.fromEnglish(row.thenCondition());
+
+// For additionalDocuments only:
+emitAdditionalDocs_CoalescedAfterCompose(composer, kase, ifHit, thenHit, row, dsl);
+
+// For all other roots, keep your existing output path.
+
+
+// Group hits under GoodsItem.additionalDocuments, then render: 1 header + IF dashes + THEN dashes (negated).
+private void emitAdditionalDocs_GroupBeforeCompose(
+        HyphenTwoPhaseComposer composer,
+        ConstraintCase kase,
+        AtomicHit ifHit,
+        AtomicHit thenHit,
+        RuleRow row,
+        DslWriter dsl) {
+
+    // True merge check
+    var orig   = new java.util.LinkedHashSet<>(extractThenCodes(row.thenCondition()));
+    var merged = new java.util.LinkedHashSet<>(row.mergedThenCodes());
+    boolean hasMerged = row.mergeGroupSize() > 1 && !merged.equals(orig);
+    String csv = row.mergedThenCodesCsv();
+
+    java.util.List<AtomicHit> ifBucket   = new java.util.ArrayList<>();
+    java.util.List<AtomicHit> thenBucket = new java.util.ArrayList<>();
+
+    if (ifHit != null && ifHit.groupsList != null) {
+        for (AtomicHit h : ifHit.groupsList) if (isAdditionalDocs(h.path())) ifBucket.add(h);
+    }
+    if (thenHit != null && thenHit.groupsList != null) {
+        for (AtomicHit h : thenHit.groupsList) if (isAdditionalDocs(h.path())) thenBucket.add(h);
+    }
+    if (ifBucket.isEmpty() && thenBucket.isEmpty()) return;
+
+    // Emit once: header
+    dsl.writeln("when");
+    dsl.writeln("  Goods item with additional documents exists");
+
+    // IF dashes (positive)
+    for (AtomicHit h : ifBucket) {
+        // dash template: convert "X with Y ..." -> "with Y ..."
+        String dash = dashFromFull(h.template);
+        var res = composer.composeEnglish(HyphenTwoPhaseComposer.Role.IF, kase, dash, h.groups, null);
+        dsl.writeln("  - " + res.english());
+    }
+
+    // THEN dashes (negated). If merged, replace value with CSV.
+    for (AtomicHit h : thenBucket) {
+        String dash = dashFromFull(h.template);
+        String negDash = negateDashTemplate(dash);
+        java.util.List<String> groups = new java.util.ArrayList<>(h.groups);
+        if (hasMerged && !groups.isEmpty() && csv != null && !csv.isBlank()) {
+            groups.set(groups.size() - 1, csv); // assume last group is the value
+        }
+        var res = composer.composeEnglish(HyphenTwoPhaseComposer.Role.IF, kase, negDash, groups, null);
+        dsl.writeln("  - " + res.english());
+    }
+
+    // THEN header (keep your normal single line)
+    if (thenHit != null) {
+        var thenHeader = composer.composeEnglish(HyphenTwoPhaseComposer.Role.THEN, kase, thenHit.template, thenHit.groups, null);
+        dsl.writeln("then");
+        dsl.writeln("  " + thenHeader.english());
+    }
+}
+
+private static String dashFromFull(String fullTemplate) {
+    if (fullTemplate == null) return "with value equals {1}";
+    int i = fullTemplate.toLowerCase().indexOf(" with ");
+    return (i >= 0) ? fullTemplate.substring(i + 1).trim() : fullTemplate; // keep “with …”
+}
+
+
+AtomicHit ifHit   = matcher.matchIf(row.ifCondition());
+AtomicHit thenHit = matcher.matchThen(row.thenCondition());
+ConstraintCase kase = ConstraintCase.fromEnglish(row.thenCondition());
+
+// For additionalDocuments only:
+emitAdditionalDocs_GroupBeforeCompose(composer, kase, ifHit, thenHit, row, dsl);
+
+// Other roots: your usual path.
+
+
+public void collectAll(List<RuleRow> rows, DslWriter dsl) {
+    for (RuleRow row : rows) {
+        AtomicHit ifHit   = matcher.matchIf(row.ifCondition());
+        AtomicHit thenHit = matcher.matchThen(row.thenCondition());
+        ConstraintCase kase = ConstraintCase.fromEnglish(row.thenCondition());
+
+        // If this rule touches GoodsItem.additionalDocuments → coalesce across IF+THEN
+        if (touchesAdditionalDocs(ifHit, thenHit)) {
+            emitAdditionalDocs_CoalescedAfterCompose(composer, kase, ifHit, thenHit, row, dsl);
+        } else {
+            // fallback to your existing emission
+            emitDefault(ifHit, thenHit, kase, dsl);
+        }
+    }
+}
+
+// ---------- small helpers you add in WhenPatternMatcher ----------
+
+private boolean touchesAdditionalDocs(AtomicHit ifHit, AtomicHit thenHit) {
+    return hasAdditionalDocs(ifHit) || hasAdditionalDocs(thenHit);
+}
+private boolean hasAdditionalDocs(AtomicHit hit) {
+    if (hit == null || hit.groupsList == null) return false;
+    for (AtomicHit h : hit.groupsList) {
+        if (h.path() != null && h.path().startsWith("GoodsItem.additionalDocuments.")) return true;
+    }
+    return false;
+}
+
+private void emitDefault(AtomicHit ifHit, AtomicHit thenHit, ConstraintCase kase, DslWriter dsl) {
+    if (ifHit != null && ifHit.groupsList != null) {
+        for (AtomicHit h : ifHit.groupsList) {
+            var r = composer.composeEnglish(HyphenTwoPhaseComposer.Role.IF, kase, h.template, h.groups, null);
+            dsl.writeln("when");
+            dsl.writeln("  " + r.english());
+        }
+    }
+    if (thenHit != null) {
+        var r = composer.composeEnglish(HyphenTwoPhaseComposer.Role.THEN, kase, thenHit.template, thenHit.groups, null);
+        dsl.writeln("then");
+        dsl.writeln("  " + r.english());
+    }
+}
+
+
+public void collectAll(List<RuleRow> rows, DslWriter dsl) {
+    for (RuleRow row : rows) {
+        AtomicHit ifHit   = matcher.matchIf(row.ifCondition());
+        AtomicHit thenHit = matcher.matchThen(row.thenCondition());
+        ConstraintCase kase = ConstraintCase.fromEnglish(row.thenCondition());
+
+        // Route GoodsItem.additionalDocuments to the grouped path
+        if (touchesAdditionalDocs(ifHit, thenHit)) {
+            emitAdditionalDocs_GroupBeforeCompose(composer, kase, ifHit, thenHit, row, dsl);
+        } else {
+            emitDefault(ifHit, thenHit, kase, dsl);
+        }
+    }
+}
