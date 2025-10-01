@@ -64,7 +64,7 @@ public final class RuleGeneratorRunner {
         Bundle bundle = om.readValue(Files.readString(rulesJson), Bundle.class);
 
         // 2) Compile atomics (anchor regex to whole-line)
-        List<CompiledAtomic> compiled = bundle.atomic().stream()
+        List<CompiledAjsontomic> compiled = bundle.atomic().stream()
                 .map(a -> new CompiledAtomic(
                         a.id(),
                         Pattern.compile("^" + a.pattern() + "$"),
