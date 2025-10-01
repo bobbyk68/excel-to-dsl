@@ -1,435 +1,68 @@
-// Lightweight builder for DSLR "when" predicates.
-// Focused on anchored, readable English lines such as:
-//   when
-//     Goods item with additional document exists
-//       with exemption code equals "UE"
-//       with type code in "D005","D008"
-//       without special procedure code equals "72M"
-class DslrWriter {
+public final class CompiledAtomic {
+    private final String id;
+    private final java.util.regex.Pattern regex;
+    private final String pattern;   // your original pattern text
+    private final String dsl;       // canonical English template
+    private final uk.gov.hmrc.pattern.PatternIntrospector.Meta meta; // cached
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Internal buffer + state
-    // ─────────────────────────────────────────────────────────────────────
-    private final StringBuilder sb = new StringBuilder(256);
-    private boolean whenStarted = false;
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Public: accessors
-    // ─────────────────────────────────────────────────────────────────────
-    String content() { return sb.toString(); }
-    boolean isEmpty() { return sb.length() == 0; }
-    void reset() { sb.setLength(0); whenStarted = false; }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // WHEN anchor line(s)
-    // anchorPath examples:
-    //   "GoodsItem.additionalDocuments"
-    //   "GoodsItem.specialProcedures"
-    //   "GoodsItem.additionalInformation"
-    // ─────────────────────────────────────────────────────────────────────
-    void whenGoodsItemExists(String anchorPath) {
-        beginWhenIfNeeded();
-        sb.append("  ").append(describeAnchor(anchorPath)).append('\n');
+    private CompiledAtomic(String id,
+                           java.util.regex.Pattern regex,
+                           String pattern,
+                           String dsl,
+                           uk.gov.hmrc.pattern.PatternIntrospector.Meta meta) {
+        this.id = id;
+        this.regex = regex;
+        this.pattern = pattern;
+        this.dsl = dsl;
+        this.meta = meta;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // WITH / WITHOUT predicates (equals / in / not equals / not in)
-    // fieldKey can be your enum or a String; we resolve a human label via labelFor(...)
-    // ─────────────────────────────────────────────────────────────────────
-    void andWithEquals(Object fieldKey, String value) {
-        line("with " + labelFor(fieldKey) + " equals " + quote(value));
-    }
+    public static CompiledAtomic compile(String id, String regexSource, String pattern, String dsl) {
+        java.util.regex.Pattern rx = java.util.regex.Pattern.compile(regexSource);
+        uk.gov.hmrc.pattern.PatternIntrospector.Meta meta =
+            uk.gov.hmrc.pattern.PatternIntrospector.parse(dsl);
 
-    void andWithNotEquals(Object fieldKey, String value) {
-        line("with " + labelFor(fieldKey) + " not equals " + quote(value));
-    }
-
-    void andWithoutEquals(Object fieldKey, String value) {
-        line("without " + labelFor(fieldKey) + " equals " + quote(value));
-    }
-
-    void andWithIn(Object fieldKey, java.util.List<String> values) {
-        line("with " + labelFor(fieldKey) + " in " + csv(values));
-    }
-
-    void andWithNotIn(Object fieldKey, java.util.List<String> values) {
-        line("with " + labelFor(fieldKey) + " not in " + csv(values));
-    }
-
-    void andWithoutIn(Object fieldKey, java.util.List<String> values) {
-        line("without " + labelFor(fieldKey) + " in " + csv(values));
-    }
-
-    // For stronger semantics (counterexamples over "ALL ..."), keep these available.
-    void andWithAllInOnly(Object fieldKey, java.util.List<String> values) {
-        line("with all " + labelFor(fieldKey) + " in " + csv(values) + " only");
-    }
-
-    void andWithAllEquals(Object fieldKey, String value) {
-        line("with all " + labelFor(fieldKey) + " equals " + quote(value));
-    }
-
-    // Raw predicate passthrough (last-resort / diagnostics)
-    void andWithPredicate(String englishPredicateLine) {
-        line(englishPredicateLine);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Helpers
-    // ─────────────────────────────────────────────────────────────────────
-    private void beginWhenIfNeeded() {
-        if (!whenStarted) {
-            sb.append("when").append('\n');
-            whenStarted = true;
+        // Safe defaults if parsing didn’t recognise the template/path
+        if (meta == null) {
+            meta = new uk.gov.hmrc.pattern.PatternIntrospector.Meta(
+                    uk.gov.hmrc.pattern.PatternIntrospector.AnchorScope.GI, // assume GI as last resort
+                    "GoodsItem",
+                    uk.gov.hmrc.pattern.PatternIntrospector.FieldKey.UNKNOWN,
+                    uk.gov.hmrc.pattern.PatternIntrospector.Operator.EQ,
+                    uk.gov.hmrc.pattern.PatternIntrospector.Quantifier.EXISTS,
+                    false,
+                    uk.gov.hmrc.pattern.PatternIntrospector.PatternKind.UNKNOWN
+            );
         }
+        return new CompiledAtomic(id, rx, pattern, dsl, meta);
     }
 
-    private void line(String text) {
-        beginWhenIfNeeded();
-        sb.append("    ").append(text).append('\n'); // 4-space indent under anchor
-    }
-
-    private String describeAnchor(String anchorPath) {
-        if (anchorPath == null || anchorPath.isBlank()) return "Goods item exists";
-        String p = anchorPath.toLowerCase();
-
-        // Map known collections to friendly phrases
-        if (p.contains("additionaldocuments")) return "Goods item with additional document exists";
-        if (p.contains("specialprocedures"))   return "Goods item with special procedure exists";
-        if (p.contains("additionalinformation")) return "Goods item with additional information exists";
-
-        // Fallback: generic
-        return "Goods item exists";
-    }
-
-    // Accept either your enum (e.g., PatternIntrospector.FieldKey) or a plain String
-    private String labelFor(Object fieldKey) {
-        if (fieldKey == null) return "field";
-        String k = fieldKey.toString(); // enum.name() or String value
-        // Normalise to upper snake for mapping
-        String key = k.trim().toUpperCase();
-
-        // Known canonical mappings
-        if (key.endsWith("AD_EXEMPTION_CODE")) return "exemption code";
-        if (key.endsWith("AD_TYPE_CODE"))      return "type code";
-        if (key.endsWith("SP_CODE"))           return "special procedure code";
-        if (key.endsWith("AI_CODE"))           return "additional-information code";
-
-        // Fallbacks: try to prettify generic keys
-        if (key.contains("_")) return key.toLowerCase().replace('_', ' ').trim();
-        return k; // last resort: leave as-is
-    }
-
-    private String quote(String value) {
-        if (value == null) return "\"\"";
-        String v = value.trim();
-        // If already quoted, keep; else wrap in "
-        boolean quoted = v.length() >= 2 && v.startsWith("\"") && v.endsWith("\"");
-        return quoted ? v : "\"" + v.replace("\"", "\\\"") + "\"";
-    }
-
-    private String csv(java.util.List<String> values) {
-        if (values == null || values.isEmpty()) return "\"\"";
-        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(values.size());
-        for (String s : values) {
-            if (s != null && !s.isBlank()) set.add(s.trim());
-        }
-        StringBuilder b = new StringBuilder();
-        boolean first = true;
-        for (String s : set) {
-            if (!first) b.append(',');
-            b.append(quote(s));
-            first = false;
-        }
-        return b.toString();
-    }
-}
-
-package uk.gov.hmrc.pattern;
-
-import java.util.regex.*;
-
-public final class PatternIntrospector {
-
-    public static enum AnchorScope { DECL, GI, SUBROW }
-    public static enum Operator    { EQ, IN }
-    public static enum Quantifier  { EXISTS, ALL, NONE, EXACTLY_ONE }
-    public static enum FieldKey    { AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE, UNKNOWN }
-    public static enum PatternKind {
-        MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL,
-        ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN
-    }
-
-    public static record Meta(
-            AnchorScope anchorScope,
-            String      anchorPath,
-            FieldKey    fieldKey,
-            Operator    operator,
-            Quantifier  quantifier,
-            boolean     negated,
-            PatternKind patternKind
-    ) {}
-
-    public static Meta parse(String english) {
-        if (english == null) english = "";
-        String t = english.trim();
-        String lower = t.toLowerCase();
-
-        // Quantifier
-        Quantifier q;
-        if (lower.startsWith("all ")) q = Quantifier.ALL;
-        else if (lower.startsWith("none ")) q = Quantifier.NONE;
-        else if (lower.startsWith("exactly one ")) q = Quantifier.EXACTLY_ONE;
-        else if (lower.startsWith("there is at least one ") || lower.startsWith("at least one ")) q = Quantifier.EXISTS;
-        else q = Quantifier.EXISTS;
-
-        // Canonical path
-        Matcher pm = Pattern
-                .compile("(GoodsItem(?:\\.[A-Za-z]+){1,3}\\.code|Declaration\\.[A-Za-z\\.]+)")
-                .matcher(t);
-        String canonicalPath = pm.find() ? pm.group(1) : "";
-
-        // Anchor scope + collection anchor path
-        AnchorScope scope = canonicalPath.startsWith("GoodsItem.") ? AnchorScope.GI : AnchorScope.DECL;
-        String anchorPath = computeAnchorPath(canonicalPath);
-
-        // FieldKey
-        FieldKey fk = fieldKeyOf(canonicalPath);
-
-        // Operator + negation
-        Operator op;
-        boolean neg;
-        if (lower.contains("one of") || lower.matches(".*\\bin\\b.*")) {
-            op  = Operator.IN;
-            neg = lower.contains("must not") || lower.contains("not one of") || lower.contains("without");
-        } else {
-            op  = Operator.EQ;
-            neg = lower.contains("must not equal") || lower.contains("not equal");
-        }
-
-        // Pattern kind (for fast deterministic switch)
-        PatternKind kind = classify(op, q, neg);
-
-        return new Meta(scope, anchorPath, fk, op, q, neg, kind);
-    }
-
-    private static String computeAnchorPath(String canonicalPath) {
-        if (canonicalPath.startsWith("GoodsItem.")) {
-            String[] p = canonicalPath.split("\\.");
-            if (p.length >= 2) return p[0] + "." + p[1]; // collection level
-        }
-        int dot = canonicalPath.indexOf('.');
-        return dot > 0 ? canonicalPath.substring(0, dot) : canonicalPath;
-    }
-
-    private static FieldKey fieldKeyOf(String canonicalPath) {
-        String s = canonicalPath.toLowerCase();
-        if (s.contains("additionaldocuments.exemption.code")) return FieldKey.AD_EXEMPTION_CODE;
-        if (s.contains("additionaldocuments.type.code"))      return FieldKey.AD_TYPE_CODE;
-        if (s.contains("specialprocedures.code"))             return FieldKey.SP_CODE;
-        if (s.contains("additionalinformation.code"))         return FieldKey.AI_CODE;
-        return FieldKey.UNKNOWN;
-    }
-
-    private static PatternKind classify(Operator op, Quantifier q, boolean neg) {
-        if (op == Operator.IN && neg && q == Quantifier.ALL)     return PatternKind.ALL_MUST_NOT_ONE_OF;
-        if (op == Operator.IN && neg)                            return PatternKind.MUST_NOT_ONE_OF;
-        if (op == Operator.EQ && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_MUST_EQUAL;
-        if (op == Operator.EQ && !neg && q == Quantifier.ALL)    return PatternKind.ALL_MUST_EQUAL;
-        if (op == Operator.IN && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_IN;
-        return PatternKind.UNKNOWN;
-    }
+    // getters used elsewhere
+    public String id() { return id; }
+    public java.util.regex.Pattern regex() { return regex; }
+    public String pattern() { return pattern; }
+    public String dsl() { return dsl; }
+    public uk.gov.hmrc.pattern.PatternIntrospector.Meta meta() { return meta; }
 }
 
 
-package uk.gov.hmrc.pattern;
-
-import java.util.*;
-import java.util.regex.*;
-import static uk.gov.hmrc.pattern.PatternIntrospector.*;
-
-public final class ResultAdapters {
-
-    // Semantic view over a single line (derived from your strings)
-    public static final class ResolvedClause {
-        public final String raw;            // the original line (dslrLines entry)
-        public final Meta   meta;           // anchor/field/op/quant/neg/kind
-        public final List<String> values;   // extracted codes (["UE"], ["D005","D008"], …)
-
-        public ResolvedClause(String raw, Meta meta, List<String> values) {
-            this.raw = raw; this.meta = meta; this.values = values;
-        }
-
-        public String value() { return values.isEmpty() ? null : values.get(0); }
-    }
-
-    // Adapt your Result to semantic clauses by parsing each DSL English line
-    public static List<ResolvedClause> resolve(HyphenComposer.Result res) {
-        if (res == null || res.dslrLines == null) return List.of();
-        List<ResolvedClause> out = new ArrayList<>(res.dslrLines.size());
-        for (String line : res.dslrLines) {
-            Meta meta = PatternIntrospector.parse(line);
-            List<String> vals = extractValues(line);
-            out.add(new ResolvedClause(line, meta, vals));
-        }
-        return out;
-    }
-
-    // Value extraction that works with your English:
-    //  - prefers quoted fragments
-    //  - else looks after "equals ", "one of ", "in "
-    //  - splits CSV, trims, dedupes (stable)
-    static List<String> extractValues(String line) {
-        if (line == null || line.isBlank()) return List.of();
-
-        // 1) quoted values: "D005","D008",…
-        Matcher qm = Pattern.compile("\"([^\"]+)\"").matcher(line);
-        List<String> quoted = new ArrayList<>();
-        while (qm.find()) quoted.add(qm.group(1).trim());
-        if (!quoted.isEmpty()) return dedupeStable(quoted);
-
-        // 2) unquoted after keywords
-        String lower = line.toLowerCase();
-        int idx = -1;
-        if ((idx = lower.indexOf("equals ")) >= 0) {
-            String tail = line.substring(idx + "equals ".length());
-            return dedupeStable(splitCodes(tail));
-        }
-        if ((idx = lower.indexOf("one of ")) >= 0) {
-            String tail = line.substring(idx + "one of ".length());
-            return dedupeStable(splitCodes(tail));
-        }
-        // cautious " in " to avoid hitting earlier words
-        if ((idx = lastIndexOfWord(lower, " in ")) >= 0) {
-            String tail = line.substring(idx + " in ".length());
-            return dedupeStable(splitCodes(tail));
-        }
-        return List.of();
-    }
-
-    private static int lastIndexOfWord(String haystack, String needleWithSpaces) {
-        return haystack.lastIndexOf(needleWithSpaces);
-    }
-
-    private static List<String> splitCodes(String s) {
-        // split by comma/space, keep A-Z0-9/_.- tokens
-        List<String> out = new ArrayList<>();
-        for (String part : s.split("[,\\s]+")) {
-            String t = part.trim();
-            if (t.isEmpty()) continue;
-            if (t.matches("[A-Za-z0-9._/-]+")) out.add(t);
-        }
-        return out;
-    }
-
-    private static List<String> dedupeStable(List<String> in) {
-        if (in == null || in.isEmpty()) return List.of();
-        LinkedHashSet<String> set = new LinkedHashSet<>(in);
-        return new ArrayList<>(set);
-    }
-}
+List<CompiledAtomic> compiled = bundle.atomic().stream()
+    .map(a -> CompiledAtomic.compile(
+            a.id(),
+            "^" + a.pattern() + "$",   // same as before, anchored regex
+            a.pattern(),
+            a.dsl()))
+    .collect(Collectors.toList());
 
 
-// Keep this method in WhenPatternMatcher (same signature)
-void emitAdditionalDocForCom(HyphenComposer.Result ifRes,
-                             HyphenComposer.Result thenRes,
-                             RuleRow row,
-                             DslrWriter dslrWriter) {
+AtomicHit hit = new AtomicHit(ca.dsl(), substituted.get(0), groups, isIf, literal);
 
-    var ifClauses   = uk.gov.hmrc.pattern.ResultAdapters.resolve(ifRes);
-    var thenClauses = uk.gov.hmrc.pattern.ResultAdapters.resolve(thenRes);
-    if (ifClauses.isEmpty()) return;
-
-    // 1) Choose the GI anchor from IF
-    ResultAdapters.ResolvedClause context = firstGoodsItem(ifClauses);
-    if (context == null) return; // anchored semantics require a GI context
-
-    // 2) Start WHEN … (anchored) and emit the context as-is (no inversion)
-    dslrWriter.whenGoodsItemExists(context.meta().anchorScope() == uk.gov.hmrc.pattern.PatternIntrospector.AnchorScope.GI
-            ? context.meta().anchorPath()
-            : "GoodsItem"); // fallback
-    // Most IFs are "equals", but we use the first value regardless
-    dslrWriter.andWithEquals(context.meta().fieldKey(), context.value());
-
-    // 3) Convert THEN policies → anchored violation triggers
-    for (var p : thenClauses) {
-        var kind = p.meta().patternKind();
-        var field = p.meta().fieldKey();
-        var vals  = p.values;
-
-        switch (kind) {
-            case MUST_NOT_ONE_OF -> {
-                // “… must not be one of S” → WITH field IN S
-                if (!vals.isEmpty()) dslrWriter.andWithIn(field, vals);
-                else if (p.value() != null) dslrWriter.andWithEquals(field, p.value());
-            }
-            case ALL_MUST_NOT_ONE_OF -> {
-                // “ALL … must not be one of S” → WITH field IN S (counterexample)
-                if (!vals.isEmpty()) dslrWriter.andWithIn(field, vals);
-                else if (p.value() != null) dslrWriter.andWithEquals(field, p.value());
-            }
-            case AT_LEAST_ONE_MUST_EQUAL -> {
-                // “at least one … must equal X” → WITHOUT field == X (absence)
-                dslrWriter.andWithoutEquals(field, p.value());
-            }
-            case ALL_MUST_EQUAL -> {
-                // Violation of “ALL == X” → WITH field != X
-                dslrWriter.andWithNotEquals(field, p.value());
-            }
-            case AT_LEAST_ONE_IN -> {
-                // “∃ ∈ S” (required) → WITHOUT any member in S
-                if (!vals.isEmpty()) dslrWriter.andWithoutIn(field, vals);
-                else if (p.value() != null) dslrWriter.andWithoutEquals(field, p.value());
-            }
-            default -> {
-                // Generic fallback using op/quant/neg
-                emitGenericAnchoredViolation(dslrWriter, p);
-            }
-        }
-    }
-}
-
-// Pick the first GoodsItem-scoped clause from IF
-private ResultAdapters.ResolvedClause firstGoodsItem(java.util.List<ResultAdapters.ResolvedClause> list) {
-    for (var c : list) {
-        if (c.meta().anchorScope() == uk.gov.hmrc.pattern.PatternIntrospector.AnchorScope.GI) return c;
-        if (c.meta().anchorPath() != null && c.meta().anchorPath().startsWith("GoodsItem")) return c;
-    }
-    return null;
-}
-
-// Generic fallback using meta flags (kept small & deterministic)
-private void emitGenericAnchoredViolation(DslrWriter out, ResultAdapters.ResolvedClause p) {
-    var meta = p.meta();
-    var field = meta.fieldKey();
-    var vals  = p.values;
-
-    switch (meta.quantifier()) {
-        case ALL -> {
-            if (meta.negated() && meta.operator() == uk.gov.hmrc.pattern.PatternIntrospector.Operator.IN) {
-                // ALL ∉ S → ∃ ∈ S
-                if (!vals.isEmpty()) out.andWithIn(field, vals); else out.andWithEquals(field, p.value());
-            } else if (!meta.negated() && meta.operator() == uk.gov.hmrc.pattern.PatternIntrospector.Operator.IN) {
-                // ALL ∈ S → ∃ ∉ S
-                if (!vals.isEmpty()) out.andWithNotIn(field, vals); else out.andWithNotEquals(field, p.value());
-            } else if (!meta.negated() && meta.operator() == uk.gov.hmrc.pattern.PatternIntrospector.Operator.EQ) {
-                // ALL == X → ∃ != X
-                out.andWithNotEquals(field, p.value());
-            } else if (meta.negated() && meta.operator() == uk.gov.hmrc.pattern.PatternIntrospector.Operator.EQ) {
-                // ALL != X → ∃ == X
-                out.andWithEquals(field, p.value());
-            } else {
-                out.andWithPredicate(p.raw); // conservative
-            }
-        }
-        default -> { // EXISTS / NONE / EXACTLY_ONE → treat as existence requirement
-            if (!meta.negated() && meta.operator() == uk.gov.hmrc.pattern.PatternIntrospector.Operator.EQ) {
-                out.andWithoutEquals(field, p.value());                  // ∃ == X → ¬∃ == X
-            } else if (!meta.negated() && meta.operator() == uk.gov.hmrc.pattern.PatternIntrospector.Operator.IN) {
-                if (!vals.isEmpty()) out.andWithoutIn(field, vals); else out.andWithoutEquals(field, p.value());
-            } else {
-                out.andWithPredicate(p.raw);
-            }
-        }
-    }
-}
+// NEW: enrich from cached meta (no JSON changes anywhere)
+uk.gov.hmrc.pattern.PatternIntrospector.Meta meta = ca.meta();
+hit.setAnchorScope(meta.anchorScope())
+   .setAnchorPath(meta.anchorPath())
+   .setFieldKey(meta.fieldKey())
+   .setOperator(meta.operator())
+   .setQuantifier(meta.quantifier())
+   .setNegated(meta.negated())
+   .setPatternKind(meta.patternKind());
