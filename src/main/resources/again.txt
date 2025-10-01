@@ -1,73 +1,158 @@
-enum AnchorScope { DECL, GI, SUBROW }                // where this hit lives
-enum Operator    { EQ, IN }                          // keep small; use negated flag
-enum Quantifier  { EXISTS, ALL, NONE, EXACTLY }      // EXACTLY for future "must be exactly 2"
-enum FieldKey {                                      // canonical targets
-    AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE
-}
-enum PatternKind {                                   // normalised pattern after parse
-    MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL,
-    ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN
-}
+class PatternIntrospector {
 
-// ──────────────────────────────────────────────
-// NEW: semantic fields used by the emitter
-// ──────────────────────────────────────────────
-private final FieldKey fieldKey;        // e.g. AD_TYPE_CODE, SP_CODE, ...
-private final AnchorScope anchorScope;  // GI for all GoodsItem.* lines
-private final String anchorPath;        // e.g. "GoodsItem.additionalDocuments"
-private final Operator operator;        // EQ or IN
-private final Quantifier quantifier;    // EXISTS/ALL/...
-private final boolean negated;          // from wording: "must not", "none of", etc.
-private final List<String> values;      // normalised multi-value set (derived from groups)
-private final PatternKind patternKind;  // convenience for switch in emitter
-private final Integer exactCount;       // nullable; for "exactly N" (future)
+    enum AnchorScope { DECL, GI, SUBROW }
+    enum Operator    { EQ, IN }
+    enum Quantifier  { EXISTS, ALL, NONE, EXACTLY_ONE }
+    enum FieldKey    { AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE, UNKNOWN }
+    enum PatternKind {
+        MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL,
+        ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN
+    }
 
-public FieldKey fieldKey()         { return fieldKey; }
-public AnchorScope anchorScope()   { return anchorScope; }
-public String anchorPath()         { return anchorPath; }
-public Operator operator()         { return operator; }
-public Quantifier quantifier()     { return quantifier; }
-public boolean isNegated()         { return negated; }
-public List<String> values()       { return values; }
-public String value()              { return values.isEmpty() ? null : values.get(0); }
-public PatternKind patternKind()   { return patternKind; }
-public Integer exactCount()        { return exactCount; }
+    static final class Meta {
+        final AnchorScope anchorScope;
+        final String anchorPath;      // e.g. "GoodsItem.additionalDocuments"
+        final FieldKey fieldKey;
+        final Operator operator;
+        final Quantifier quantifier;
+        final boolean negated;
+        final PatternKind patternKind;
 
+        Meta(AnchorScope scope, String path, FieldKey fk, Operator op,
+             Quantifier q, boolean neg, PatternKind kind) {
+            this.anchorScope = scope; this.anchorPath = path; this.fieldKey = fk;
+            this.operator = op; this.quantifier = q; this.negated = neg; this.patternKind = kind;
+        }
+    }
 
-enum AnchorScope { DECL, GI, SUBROW }         // declaration / same goods item / same sub-row
-enum Operator    { EQ, IN }                   // keep small; combine with negated flag
-enum Quantifier  { EXISTS, ALL, NONE, EXACTLY_ONE }
-enum FieldKey    { AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE }
-enum PatternKind { MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL, ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN }
+    // ──────────────────────────────────────────────────────────────
+    // Parse a canonical English/DSL template (e.g. your ca.dsl()).
+    // Robust to variants like "must is not one of".
+    // ──────────────────────────────────────────────────────────────
+    static Meta parse(String template) {
+        String t = template.trim();
 
-for (CompiledAtomic ca : compiled) {
-    Matcher m = ca.regex().matcher(literal);
-    if (m.matches()) {
-        List<String> substituted = substituteAll(List.of(ca.dsl()), m);
-        List<String> groups = new ArrayList<>(m.groupCount());
-        for (int i = 1; i <= m.groupCount(); i++) groups.add(m.group(i).trim());
+        // 1) Quantifier
+        Quantifier q;
+        if (t.toLowerCase().startsWith("all ")) q = Quantifier.ALL;
+        else if (t.toLowerCase().startsWith("none ")) q = Quantifier.NONE;
+        else if (t.toLowerCase().startsWith("exactly one ")) q = Quantifier.EXACTLY_ONE;
+        else if (t.toLowerCase().startsWith("there is at least one ")
+              || t.toLowerCase().startsWith("at least one ")) q = Quantifier.EXISTS;
+        else q = Quantifier.EXISTS; // sensible default for single-line patterns
 
-        // ✳️ NEW: pull semantics from the compiled pattern’s metadata
-        FieldKey fieldKey       = ca.fieldKey();        // e.g. AD_TYPE_CODE
-        AnchorScope anchorScope = AnchorScope.GI;       // all GoodsItem.* → GI
-        String anchorPath       = ca.anchorPath();      // "GoodsItem.additionalDocuments"
-        Operator operator       = ca.operator();        // EQ / IN
-        Quantifier quantifier   = ca.quantifier();      // EXISTS / ALL / ...
-        boolean negated         = ca.negated();         // from “must not…”
-        PatternKind patternKind = ca.patternKind();     // MUST_NOT_ONE_OF, etc.
+        // 2) Canonical path (we expect it to appear literally in your template)
+        //    Examples we support:
+        //    GoodsItem.additionalDocuments.exemption.code
+        //    GoodsItem.additionalDocuments.type.code
+        //    GoodsItem.specialProcedures.code
+        //    GoodsItem.additionalInformation.code
+        java.util.regex.Matcher pm = java.util.regex.Pattern
+            .compile("(GoodsItem(?:\\.[A-Za-z]+){1,3}\\.code|Declaration\\.[A-Za-z\\.]+)")
+            .matcher(t);
+        String canonicalPath = pm.find() ? pm.group(1) : "";
 
-        AtomicHit hit = new AtomicHit(
-            ca.dsl(), substituted.get(0), groups, isIf, literal,
-            fieldKey, anchorScope, anchorPath, operator, quantifier, negated, patternKind
-        );
-        cache.put(literal, hit);
-        return hit;
+        // 3) Anchor scope + anchor path
+        AnchorScope scope = canonicalPath.startsWith("GoodsItem.") ? AnchorScope.GI : AnchorScope.DECL;
+        String anchorPath = computeAnchorPath(canonicalPath); // collection-level for GI
+
+        // 4) FieldKey mapping
+        FieldKey fk = fieldKeyOf(canonicalPath);
+
+        // 5) Operator + negation
+        //    Accept "equals"/"equal", "one of"/"in", "must not"/"not one of", "without"
+        String lower = t.toLowerCase();
+        Operator op;
+        boolean neg;
+        if (lower.contains("one of") || lower.matches(".*\\bin\\b.*")) {
+            op  = Operator.IN;
+            neg = lower.contains("must not") || lower.contains("not one of") || lower.contains("without");
+        } else {
+            op  = Operator.EQ; // "equals"/"equal" or implied equality
+            neg = lower.contains("must not equal") || lower.contains("not equal");
+        }
+
+        // 6) Classify to a pattern kind (helps your emitter switch deterministically)
+        PatternKind kind = classify(op, q, neg, lower);
+
+        return new Meta(scope, anchorPath, fk, op, q, neg, kind);
+    }
+
+    // ── helpers ───────────────────────────────────────────────────
+    private static String computeAnchorPath(String canonicalPath) {
+        if (canonicalPath.startsWith("GoodsItem.")) {
+            String[] p = canonicalPath.split("\\.");
+            // "GoodsItem.additionalDocuments.exemption.code" → "GoodsItem.additionalDocuments"
+            // "GoodsItem.specialProcedures.code"            → "GoodsItem.specialProcedures"
+            if (p.length >= 2) return p[0] + "." + p[1];
+        }
+        // Declaration-level: keep "Declaration" or first segment
+        int dot = canonicalPath.indexOf('.');
+        return dot > 0 ? canonicalPath.substring(0, dot) : canonicalPath;
+    }
+
+    private static FieldKey fieldKeyOf(String canonicalPath) {
+        String s = canonicalPath.toLowerCase();
+        if (s.contains("additionaldocuments.exemption.code")) return FieldKey.AD_EXEMPTION_CODE;
+        if (s.contains("additionaldocuments.type.code"))      return FieldKey.AD_TYPE_CODE;
+        if (s.contains("specialprocedures.code"))             return FieldKey.SP_CODE;
+        if (s.contains("additionalinformation.code"))         return FieldKey.AI_CODE;
+        return FieldKey.UNKNOWN;
+    }
+
+    private static PatternKind classify(Operator op, Quantifier q, boolean neg, String lowerTemplate) {
+        if (op == Operator.IN && neg && q == Quantifier.ALL)    return PatternKind.ALL_MUST_NOT_ONE_OF;
+        if (op == Operator.IN && neg)                           return PatternKind.MUST_NOT_ONE_OF;
+        if (op == Operator.EQ && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_MUST_EQUAL;
+        if (op == Operator.EQ && !neg && q == Quantifier.ALL)    return PatternKind.ALL_MUST_EQUAL;
+        if (op == Operator.IN && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_IN;
+        return PatternKind.UNKNOWN;
     }
 }
 
 
-emitAdditionalDocForCom(HyphenComposer.Result ifRes,
-                        HyphenComposer.Result thenRes,
-                        RuleRow row,
-                        DslrWriter dslrWriter)
+// ===== NEW FIELDS (semantics inferred from template) =====
+private PatternIntrospector.FieldKey fieldKey;
+private PatternIntrospector.AnchorScope anchorScope;
+private String anchorPath;
+private PatternIntrospector.Operator operator;
+private PatternIntrospector.Quantifier quantifier;
+private boolean negated;
+private PatternIntrospector.PatternKind patternKind;
 
+// ===== NEW GETTERS =====
+public PatternIntrospector.FieldKey fieldKey()       { return fieldKey; }
+public PatternIntrospector.AnchorScope anchorScope() { return anchorScope; }
+public String anchorPath()                           { return anchorPath; }
+public PatternIntrospector.Operator operator()       { return operator; }
+public PatternIntrospector.Quantifier quantifier()   { return quantifier; }
+public boolean isNegated()                           { return negated; }
+public PatternIntrospector.PatternKind patternKind() { return patternKind; }
+
+// ===== NEW SETTERS (used only by matcher) =====
+public AtomicHit setFieldKey(PatternIntrospector.FieldKey v){ this.fieldKey = v; return this; }
+public AtomicHit setAnchorScope(PatternIntrospector.AnchorScope v){ this.anchorScope = v; return this; }
+public AtomicHit setAnchorPath(String v){ this.anchorPath = v; return this; }
+public AtomicHit setOperator(PatternIntrospector.Operator v){ this.operator = v; return this; }
+public AtomicHit setQuantifier(PatternIntrospector.Quantifier v){ this.quantifier = v; return this; }
+public AtomicHit setNegated(boolean v){ this.negated = v; return this; }
+public AtomicHit setPatternKind(PatternIntrospector.PatternKind v){ this.patternKind = v; return this; }
+
+// ===== CONVENIENCE (reuse your groups as values) =====
+public java.util.List<String> values() { return groups; }
+public String value() { return groups.isEmpty() ? null : groups.get(0); }
+
+
+
+// existing
+AtomicHit hit = new AtomicHit(ca.dsl(), substituted.get(0), groups, isIf, literal);
+
+// NEW: infer semantics from the template (no JSON changes)
+var meta = uk.gov.hmrc.dslgen.pattern.PatternIntrospector.parse(ca.dsl());
+hit.setAnchorScope(meta.anchorScope)
+   .setAnchorPath(meta.anchorPath)
+   .setFieldKey(meta.fieldKey)
+   .setOperator(meta.operator)
+   .setQuantifier(meta.quantifier)
+   .setNegated(meta.negated)
+   .setPatternKind(meta.patternKind);
