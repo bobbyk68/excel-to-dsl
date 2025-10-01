@@ -1,158 +1,417 @@
-class PatternIntrospector {
+public final class CompiledAtomic {
 
-    enum AnchorScope { DECL, GI, SUBROW }
-    enum Operator    { EQ, IN }
-    enum Quantifier  { EXISTS, ALL, NONE, EXACTLY_ONE }
-    enum FieldKey    { AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE, UNKNOWN }
-    enum PatternKind {
-        MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL,
-        ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN
+    // ─────────────────────────────────────────────────────────────────────────
+    // EXISTING FIELDS (kept): regex + canonical English DSL template
+    // ─────────────────────────────────────────────────────────────────────────
+    private final java.util.regex.Pattern regex;
+    private final String dsl; // canonical English with placeholders {1},{2},...
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: semantic fields for anchoring + policy→violation conversion
+    // ─────────────────────────────────────────────────────────────────────────
+    // Anchor scope: Declaration vs SAME GoodsItem vs SAME sub-row (doc/proc row)
+    public enum AnchorScope { DECL, GI, SUBROW }
+
+    // Target field (kept small & canonical to avoid drift across lines)
+    public enum FieldKey { AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE }
+
+    // Logical operator captured by the pattern
+    public enum Operator { EQ, IN }
+
+    // Quantifier coming from “at least one”, “all”, etc.
+    public enum Quantifier { EXISTS, ALL, NONE, EXACTLY_ONE }
+
+    // Convenience kind for quick switching in the emitter
+    public enum PatternKind {
+        MUST_NOT_ONE_OF,        // “… must not be one of S”
+        ALL_MUST_NOT_ONE_OF,    // “ALL … must not be one of S”
+        AT_LEAST_ONE_MUST_EQUAL,// “at least one … must equal X”
+        ALL_MUST_EQUAL,         // “ALL … must equal X”
+        AT_LEAST_ONE_IN,        // “at least one … in S”
+        UNKNOWN                 // fallback
     }
 
-    static final class Meta {
-        final AnchorScope anchorScope;
-        final String anchorPath;      // e.g. "GoodsItem.additionalDocuments"
-        final FieldKey fieldKey;
-        final Operator operator;
-        final Quantifier quantifier;
-        final boolean negated;
-        final PatternKind patternKind;
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: semantic state (all final)
+    // ─────────────────────────────────────────────────────────────────────────
+    private final AnchorScope anchorScope; // e.g. GI for GoodsItem.*
+    private final String anchorPath;       // e.g. "GoodsItem.additionalDocuments"
+    private final FieldKey fieldKey;       // e.g. AD_TYPE_CODE / SP_CODE
+    private final Operator operator;       // EQ / IN
+    private final Quantifier quantifier;   // EXISTS / ALL / ...
+    private final boolean negated;         // true for “must not”, “none of…”
+    private final PatternKind patternKind; // convenience classification
 
-        Meta(AnchorScope scope, String path, FieldKey fk, Operator op,
-             Quantifier q, boolean neg, PatternKind kind) {
-            this.anchorScope = scope; this.anchorPath = path; this.fieldKey = fk;
-            this.operator = op; this.quantifier = q; this.negated = neg; this.patternKind = kind;
+    // ─────────────────────────────────────────────────────────────────────────
+    // CTOR
+    // ─────────────────────────────────────────────────────────────────────────
+    public CompiledAtomic(java.util.regex.Pattern regex,
+                          String dsl,
+                          AnchorScope anchorScope,
+                          String anchorPath,
+                          FieldKey fieldKey,
+                          Operator operator,
+                          Quantifier quantifier,
+                          boolean negated,
+                          PatternKind patternKind) {
+        this.regex = java.util.Objects.requireNonNull(regex, "regex");
+        this.dsl = java.util.Objects.requireNonNull(dsl, "dsl");
+        this.anchorScope = java.util.Objects.requireNonNull(anchorScope, "anchorScope");
+        this.anchorPath = java.util.Objects.requireNonNull(anchorPath, "anchorPath");
+        this.fieldKey = java.util.Objects.requireNonNull(fieldKey, "fieldKey");
+        this.operator = java.util.Objects.requireNonNull(operator, "operator");
+        this.quantifier = java.util.Objects.requireNonNull(quantifier, "quantifier");
+        this.negated = negated;
+        this.patternKind = java.util.Objects.requireNonNull(patternKind, "patternKind");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GETTERS (kept names you already use: regex(), dsl())
+    // ─────────────────────────────────────────────────────────────────────────
+    public java.util.regex.Pattern regex()      { return regex; }
+    public String dsl()                         { return dsl; }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW: getters consumed by AtomicMatcher → AtomicHit enrichment
+    // ─────────────────────────────────────────────────────────────────────────
+    public AnchorScope anchorScope()            { return anchorScope; }
+    public String anchorPath()                  { return anchorPath; }
+    public FieldKey fieldKey()                  { return fieldKey; }
+    public Operator operator()                  { return operator; }
+    public Quantifier quantifier()              { return quantifier; }
+    public boolean negated()                    { return negated; }
+    public PatternKind patternKind()            { return patternKind; }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OPTIONAL: builder for clean construction from your JSON/pattern library
+    // ─────────────────────────────────────────────────────────────────────────
+    public static Builder builder() { return new Builder(); }
+
+    public static final class Builder {
+        private java.util.regex.Pattern regex;
+        private String dsl;
+        private AnchorScope anchorScope = AnchorScope.GI; // sensible default for GoodsItem.*; override for DECL/SUBROW
+        private String anchorPath = "GoodsItem";          // override with exact path
+        private FieldKey fieldKey;
+        private Operator operator = Operator.EQ;
+        private Quantifier quantifier = Quantifier.EXISTS;
+        private boolean negated;
+        private PatternKind patternKind = PatternKind.UNKNOWN;
+
+        public Builder regex(java.util.regex.Pattern v)         { this.regex = v; return this; }
+        public Builder dsl(String v)                            { this.dsl = v; return this; }
+        public Builder anchorScope(AnchorScope v)               { this.anchorScope = v; return this; }
+        public Builder anchorPath(String v)                     { this.anchorPath = v; return this; }
+        public Builder fieldKey(FieldKey v)                     { this.fieldKey = v; return this; }
+        public Builder operator(Operator v)                     { this.operator = v; return this; }
+        public Builder quantifier(Quantifier v)                 { this.quantifier = v; return this; }
+        public Builder negated(boolean v)                       { this.negated = v; return this; }
+        public Builder patternKind(PatternKind v)               { this.patternKind = v; return this; }
+
+        public CompiledAtomic build() {
+            return new CompiledAtomic(regex, dsl, anchorScope, anchorPath, fieldKey,
+                                      operator, quantifier, negated, patternKind);
         }
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Parse a canonical English/DSL template (e.g. your ca.dsl()).
-    // Robust to variants like "must is not one of".
-    // ──────────────────────────────────────────────────────────────
-    static Meta parse(String template) {
-        String t = template.trim();
-
-        // 1) Quantifier
-        Quantifier q;
-        if (t.toLowerCase().startsWith("all ")) q = Quantifier.ALL;
-        else if (t.toLowerCase().startsWith("none ")) q = Quantifier.NONE;
-        else if (t.toLowerCase().startsWith("exactly one ")) q = Quantifier.EXACTLY_ONE;
-        else if (t.toLowerCase().startsWith("there is at least one ")
-              || t.toLowerCase().startsWith("at least one ")) q = Quantifier.EXISTS;
-        else q = Quantifier.EXISTS; // sensible default for single-line patterns
-
-        // 2) Canonical path (we expect it to appear literally in your template)
-        //    Examples we support:
-        //    GoodsItem.additionalDocuments.exemption.code
-        //    GoodsItem.additionalDocuments.type.code
-        //    GoodsItem.specialProcedures.code
-        //    GoodsItem.additionalInformation.code
-        java.util.regex.Matcher pm = java.util.regex.Pattern
-            .compile("(GoodsItem(?:\\.[A-Za-z]+){1,3}\\.code|Declaration\\.[A-Za-z\\.]+)")
-            .matcher(t);
-        String canonicalPath = pm.find() ? pm.group(1) : "";
-
-        // 3) Anchor scope + anchor path
-        AnchorScope scope = canonicalPath.startsWith("GoodsItem.") ? AnchorScope.GI : AnchorScope.DECL;
-        String anchorPath = computeAnchorPath(canonicalPath); // collection-level for GI
-
-        // 4) FieldKey mapping
-        FieldKey fk = fieldKeyOf(canonicalPath);
-
-        // 5) Operator + negation
-        //    Accept "equals"/"equal", "one of"/"in", "must not"/"not one of", "without"
-        String lower = t.toLowerCase();
-        Operator op;
-        boolean neg;
-        if (lower.contains("one of") || lower.matches(".*\\bin\\b.*")) {
-            op  = Operator.IN;
-            neg = lower.contains("must not") || lower.contains("not one of") || lower.contains("without");
-        } else {
-            op  = Operator.EQ; // "equals"/"equal" or implied equality
-            neg = lower.contains("must not equal") || lower.contains("not equal");
-        }
-
-        // 6) Classify to a pattern kind (helps your emitter switch deterministically)
-        PatternKind kind = classify(op, q, neg, lower);
-
-        return new Meta(scope, anchorPath, fk, op, q, neg, kind);
-    }
-
-    // ── helpers ───────────────────────────────────────────────────
-    private static String computeAnchorPath(String canonicalPath) {
-        if (canonicalPath.startsWith("GoodsItem.")) {
-            String[] p = canonicalPath.split("\\.");
-            // "GoodsItem.additionalDocuments.exemption.code" → "GoodsItem.additionalDocuments"
-            // "GoodsItem.specialProcedures.code"            → "GoodsItem.specialProcedures"
-            if (p.length >= 2) return p[0] + "." + p[1];
-        }
-        // Declaration-level: keep "Declaration" or first segment
-        int dot = canonicalPath.indexOf('.');
-        return dot > 0 ? canonicalPath.substring(0, dot) : canonicalPath;
-    }
-
-    private static FieldKey fieldKeyOf(String canonicalPath) {
-        String s = canonicalPath.toLowerCase();
-        if (s.contains("additionaldocuments.exemption.code")) return FieldKey.AD_EXEMPTION_CODE;
-        if (s.contains("additionaldocuments.type.code"))      return FieldKey.AD_TYPE_CODE;
-        if (s.contains("specialprocedures.code"))             return FieldKey.SP_CODE;
-        if (s.contains("additionalinformation.code"))         return FieldKey.AI_CODE;
-        return FieldKey.UNKNOWN;
-    }
-
-    private static PatternKind classify(Operator op, Quantifier q, boolean neg, String lowerTemplate) {
-        if (op == Operator.IN && neg && q == Quantifier.ALL)    return PatternKind.ALL_MUST_NOT_ONE_OF;
-        if (op == Operator.IN && neg)                           return PatternKind.MUST_NOT_ONE_OF;
-        if (op == Operator.EQ && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_MUST_EQUAL;
-        if (op == Operator.EQ && !neg && q == Quantifier.ALL)    return PatternKind.ALL_MUST_EQUAL;
-        if (op == Operator.IN && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_IN;
-        return PatternKind.UNKNOWN;
+    // ─────────────────────────────────────────────────────────────────────────
+    // OPTIONAL: tiny helpers for common patterns from your library
+    // (useful when wiring UE/type-code, SP code, etc.; delete if not needed)
+    // ─────────────────────────────────────────────────────────────────────────
+    public static CompiledAtomic ofTypeMustNotOneOf(java.util.regex.Pattern rx,
+                                                    String dslTemplate,
+                                                    String giPath,
+                                                    FieldKey fk) {
+        return CompiledAtomic.builder()
+                .regex(rx)
+                .dsl(dslTemplate)
+                .anchorScope(AnchorScope.GI)
+                .anchorPath(giPath)                // e.g. "GoodsItem.additionalDocuments"
+                .fieldKey(fk)                      // e.g. FieldKey.AD_TYPE_CODE
+                .operator(Operator.IN)
+                .quantifier(Quantifier.EXISTS)
+                .negated(true)                     // “must not”
+                .patternKind(PatternKind.MUST_NOT_ONE_OF)
+                .build();
     }
 }
 
 
-// ===== NEW FIELDS (semantics inferred from template) =====
-private PatternIntrospector.FieldKey fieldKey;
-private PatternIntrospector.AnchorScope anchorScope;
-private String anchorPath;
-private PatternIntrospector.Operator operator;
-private PatternIntrospector.Quantifier quantifier;
-private boolean negated;
-private PatternIntrospector.PatternKind patternKind;
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANGED: Anchored policy→violation emitter (keeps same 4-param signature)
+// Purpose:
+//   • Bind SAME-GoodsItem anchor from IF.
+//   • Convert THEN policies into violation triggers on the SAME GoodsItem.
+//   • Stop deriving from raw text; use semantics carried by AtomicHit.
+// Assumptions:
+//   • HyphenComposer.Result provides a list of AtomicHit (getter shown as getHits()).
+//   • AtomicHit exposes: anchorScope(), anchorPath(), fieldKey(), patternKind(),
+//     values(), value(), quantifier(), operator(), isNegated().
+//   • DslrWriter supports: whenGoodsItemExists(String path), andWithEquals(...),
+//     andWithIn(...), andWithoutEquals(...), andWithNotEquals(...), andWithoutIn(...),
+//     andWithNotIn(...), andWithAllInOnly(...), andWithAllEquals(...), andWithPredicate(String).
+//   • Connectors (AND/OR/NOT) are resolved upstream by HyphenComposer (or handled elsewhere).
+// ─────────────────────────────────────────────────────────────────────────────
+void emitAdditionalDocForCom(HyphenComposer.Result ifRes,
+                             HyphenComposer.Result thenRes,
+                             RuleRow row,
+                             DslrWriter dslrWriter) {
 
-// ===== NEW GETTERS =====
-public PatternIntrospector.FieldKey fieldKey()       { return fieldKey; }
-public PatternIntrospector.AnchorScope anchorScope() { return anchorScope; }
-public String anchorPath()                           { return anchorPath; }
-public PatternIntrospector.Operator operator()       { return operator; }
-public PatternIntrospector.Quantifier quantifier()   { return quantifier; }
-public boolean isNegated()                           { return negated; }
-public PatternIntrospector.PatternKind patternKind() { return patternKind; }
+    // ── Guard: must have IF context to anchor on a GoodsItem
+    java.util.List<AtomicHit> ifHits = hitsOf(ifRes);
+    if (ifHits.isEmpty()) return;
 
-// ===== NEW SETTERS (used only by matcher) =====
-public AtomicHit setFieldKey(PatternIntrospector.FieldKey v){ this.fieldKey = v; return this; }
-public AtomicHit setAnchorScope(PatternIntrospector.AnchorScope v){ this.anchorScope = v; return this; }
-public AtomicHit setAnchorPath(String v){ this.anchorPath = v; return this; }
-public AtomicHit setOperator(PatternIntrospector.Operator v){ this.operator = v; return this; }
-public AtomicHit setQuantifier(PatternIntrospector.Quantifier v){ this.quantifier = v; return this; }
-public AtomicHit setNegated(boolean v){ this.negated = v; return this; }
-public AtomicHit setPatternKind(PatternIntrospector.PatternKind v){ this.patternKind = v; return this; }
+    AtomicHit context = firstGoodsItemContext(ifHits);
+    if (context == null) {
+        // If you truly want to allow DECL-level only rules, handle here; for anchored semantics we skip.
+        return;
+    }
 
-// ===== CONVENIENCE (reuse your groups as values) =====
-public java.util.List<String> values() { return groups; }
-public String value() { return groups.isEmpty() ? null : groups.get(0); }
+    // ── 1) Start WHEN … anchored to SAME GoodsItem as the IF clause
+    dslrWriter.whenGoodsItemExists(context.anchorPath());
+    dslrWriter.andWithEquals(context.fieldKey(), context.value());
+
+    // ── 2) Convert THEN policies → anchored violation triggers
+    for (AtomicHit p : hitsOf(thenRes)) {
+        java.util.List<String> vals = dedupeStable(p.values());
+
+        switch (p.patternKind()) {
+
+            // “... type.code must not be one of S”
+            case MUST_NOT_ONE_OF -> {
+                // Violation (anchored): WITH type.code IN S
+                if (!vals.isEmpty()) {
+                    dslrWriter.andWithIn(p.fieldKey(), vals);
+                } else if (p.value() != null) {
+                    dslrWriter.andWithEquals(p.fieldKey(), p.value());
+                }
+            }
+
+            // “ALL … code must not be one of S”  (counterexample)
+            case ALL_MUST_NOT_ONE_OF -> {
+                // Violation (anchored): WITH code IN S
+                if (!vals.isEmpty()) {
+                    dslrWriter.andWithIn(p.fieldKey(), vals);
+                } else if (p.value() != null) {
+                    dslrWriter.andWithEquals(p.fieldKey(), p.value());
+                }
+            }
+
+            // “at least one … code must equal X”
+            case AT_LEAST_ONE_MUST_EQUAL -> {
+                // Violation (anchored): WITHOUT code == X  (absence of required value)
+                dslrWriter.andWithoutEquals(p.fieldKey(), p.value());
+            }
+
+            // Optional explicit patterns (kept readable & explicit)
+            case ALL_MUST_EQUAL -> {
+                // Violation (anchored): WITH code != X  (counterexample)
+                dslrWriter.andWithNotEquals(p.fieldKey(), p.value());
+            }
+
+            case AT_LEAST_ONE_IN -> {
+                // Violation (anchored): WITHOUT any member in S
+                if (!vals.isEmpty()) {
+                    dslrWriter.andWithoutIn(p.fieldKey(), vals);
+                } else if (p.value() != null) {
+                    // single value form
+                    dslrWriter.andWithoutEquals(p.fieldKey(), p.value());
+                }
+            }
+
+            // Unknown/misc → generic inversion based on quantifier/operator/negation
+            default -> emitGenericAnchoredViolation(dslrWriter, p, vals);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW (helper): choose first GI-scoped hit as the anchor (SAME GoodsItem).
+// ─────────────────────────────────────────────────────────────────────────────
+private AtomicHit firstGoodsItemContext(java.util.List<AtomicHit> hits) {
+    for (AtomicHit h : hits) {
+        if (h.anchorScope() == PatternIntrospector.AnchorScope.GI) return h;
+        String path = h.anchorPath();
+        if (path != null && path.startsWith("GoodsItem")) return h; // tolerant fallback
+    }
+    return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW (helper): generic inversion when patternKind is UNKNOWN or unhandled.
+// Encodes the counterexample logic:
+//   • ALL ∉ S  →  ∃ ∈ S        (withIn)
+//   • ALL ∈ S  →  ∃ ∉ S        (withNotIn)
+//   • ALL == X →  ∃ != X       (withNotEquals)
+//   • ALL != X →  ∃ == X       (withEquals)
+//   • ∃ == X   →  ¬∃ == X      (withoutEquals)
+//   • ∃ ∈ S    →  ¬∃ ∈ S      (withoutIn)
+// ─────────────────────────────────────────────────────────────────────────────
+private void emitGenericAnchoredViolation(DslrWriter out, AtomicHit p, java.util.List<String> vals) {
+    switch (p.quantifier()) {
+        case ALL -> {
+            if (p.isNegated() && p.operator() == PatternIntrospector.Operator.IN) {
+                // ALL ∉ S → ∃ ∈ S
+                if (!vals.isEmpty()) out.andWithIn(p.fieldKey(), vals);
+                else out.andWithEquals(p.fieldKey(), p.value());
+            } else if (!p.isNegated() && p.operator() == PatternIntrospector.Operator.IN) {
+                // ALL ∈ S → ∃ ∉ S
+                if (!vals.isEmpty()) out.andWithNotIn(p.fieldKey(), vals);
+                else out.andWithNotEquals(p.fieldKey(), p.value());
+            } else if (!p.isNegated() && p.operator() == PatternIntrospector.Operator.EQ) {
+                // ALL == X → ∃ != X
+                out.andWithNotEquals(p.fieldKey(), p.value());
+            } else if (p.isNegated() && p.operator() == PatternIntrospector.Operator.EQ) {
+                // ALL != X → ∃ == X
+                out.andWithEquals(p.fieldKey(), p.value());
+            } else {
+                out.andWithPredicate(p.dsl()); // conservative fallback to positive predicate text
+            }
+        }
+        case EXISTS, NONE, EXACTLY_ONE -> {
+            // Treat EXISTS/NONE/EXACTLY_ONE as “some-kind-of existence requirement”:
+            //   ∃ == X → NOT ∃ == X
+            //   ∃ ∈ S  → NOT ∃ ∈ S
+            if (!p.isNegated() && p.operator() == PatternIntrospector.Operator.EQ) {
+                out.andWithoutEquals(p.fieldKey(), p.value());
+            } else if (!p.isNegated() && p.operator() == PatternIntrospector.Operator.IN) {
+                if (!vals.isEmpty()) out.andWithoutIn(p.fieldKey(), vals);
+                else out.andWithoutEquals(p.fieldKey(), p.value());
+            } else if (p.isNegated() && p.operator() == PatternIntrospector.Operator.IN) {
+                // ∃ ∉ S → ALL ∈ S  (approximation; refine if you model counts)
+                if (!vals.isEmpty()) out.andWithAllInOnly(p.fieldKey(), vals);
+                else out.andWithPredicate(p.dsl());
+            } else if (p.isNegated() && p.operator() == PatternIntrospector.Operator.EQ) {
+                // ∃ != X → ALL == X
+                out.andWithAllEquals(p.fieldKey(), p.value());
+            } else {
+                out.andWithPredicate(p.dsl());
+            }
+        }
+        default -> out.andWithPredicate(p.dsl());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW (helper): stable-dedupe values for IN lists (preserve author order).
+// ─────────────────────────────────────────────────────────────────────────────
+private java.util.List<String> dedupeStable(java.util.List<String> in) {
+    if (in == null || in.isEmpty()) return java.util.Collections.emptyList();
+    java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(in.size());
+    for (String s : in) if (s != null && !s.isBlank()) set.add(s.trim());
+    return new java.util.ArrayList<>(set);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEW (helper): tolerant accessor for HyphenComposer.Result → List<AtomicHit>
+// Adjust to your actual API if needed (e.g., res.hits() / res.getClauses()).
+// ─────────────────────────────────────────────────────────────────────────────
+private java.util.List<AtomicHit> hitsOf(HyphenComposer.Result res) {
+    if (res == null) return java.util.Collections.emptyList();
+    return res.getHits(); // ← rename if your API differs
+}
 
 
+void emitAdditionalDocForCom(HyphenComposer.Result ifRes,
+                             HyphenComposer.Result thenRes,
+                             RuleRow row,
+                             DslrWriter out) {
 
-// existing
-AtomicHit hit = new AtomicHit(ca.dsl(), substituted.get(0), groups, isIf, literal);
+    if (ifRes == null /* or ifRes.isEmpty() per your API */) return;
 
-// NEW: infer semantics from the template (no JSON changes)
-var meta = uk.gov.hmrc.dslgen.pattern.PatternIntrospector.parse(ca.dsl());
-hit.setAnchorScope(meta.anchorScope)
-   .setAnchorPath(meta.anchorPath)
-   .setFieldKey(meta.fieldKey)
-   .setOperator(meta.operator)
-   .setQuantifier(meta.quantifier)
-   .setNegated(meta.negated)
-   .setPatternKind(meta.patternKind);
+    // pick the first GoodsItem-scoped context hit
+    AtomicHit context = selectGoodsItemContext(
+        /* replace with your list getter */ ifRes.getHits()
+    );
+    if (context == null) {
+        // fallback to first hit if you don't find a GI-scoped one
+        List<AtomicHit> hits = ifRes.getHits();
+        if (hits == null || hits.isEmpty()) return;
+        context = hits.get(0);
+    }
+
+    // Start WHEN… anchored to the SAME GoodsItem as the context hit
+    out.whenGoodsItemExists(
+        /* anchor path for the GI scope */ context.getAnchorPath()
+    );
+    out.andWithEquals(
+        /* canonical field key */ context.getFieldKey(),
+        /* single value */       context.getValue()
+    );
+
+    // THEN policies → anchored violation triggers
+    if (thenRes != null /* && !thenRes.isEmpty() per your API */) {
+        for (AtomicHit p : thenRes.getHits()) {
+            switch (p.getPatternKind()) {
+                case MUST_NOT_ONE_OF -> {
+                    // “... type.code must not be one of S” → WITH type.code IN S
+                    out.andWithIn(p.getFieldKey(), p.getValues());
+                }
+                case ALL_MUST_NOT_ONE_OF -> {
+                    // “ALL … code must not be one of S” → WITH code IN S (counterexample)
+                    out.andWithIn(p.getFieldKey(), p.getValues());
+                }
+                case AT_LEAST_ONE_MUST_EQUAL -> {
+                    // “… must equal X” → WITHOUT == X (absence = violation)
+                    out.andWithoutEquals(p.getFieldKey(), p.getValue());
+                }
+                default -> {
+                    // generic inversion (quantifier/operator/negation)
+                    emitGenericAnchoredViolation(out, p);
+                }
+            }
+        }
+    }
+}
+
+// Choose a GI-scoped context hit
+private AtomicHit selectGoodsItemContext(List<AtomicHit> hits) {
+    if (hits == null) return null;
+    for (AtomicHit h : hits) {
+        // Replace with your own test for GoodsItem scope:
+        // e.g., h.getAnchorScope()==GI or h.getAnchorPath().startsWith("GoodsItem")
+        String path = h.getAnchorPath();
+        if (path != null && path.startsWith("GoodsItem")) return h;
+    }
+    return null;
+}
+
+private void emitGenericAnchoredViolation(DslrWriter out, AtomicHit p) {
+    switch (p.getQuantifier()) {
+        case ALL -> {
+            if (p.isNegated() && p.getOperator() == Operator.IN) {
+                // ALL ∉ S → ∃ ∈ S
+                out.andWithIn(p.getFieldKey(), p.getValues());
+            } else if (!p.isNegated() && p.getOperator() == Operator.IN) {
+                // ALL ∈ S → ∃ ∉ S
+                out.andWithNotIn(p.getFieldKey(), p.getValues());
+            } else if (!p.isNegated() && p.getOperator() == Operator.EQ) {
+                // ALL == X → ∃ != X
+                out.andWithNotEquals(p.getFieldKey(), p.getValue());
+            } else if (p.isNegated() && p.getOperator() == Operator.EQ) {
+                // ALL != X → ∃ == X
+                out.andWithEquals(p.getFieldKey(), p.getValue());
+            } else {
+                out.andWithPredicate(p.toPositivePredicate()); // conservative fallback
+            }
+        }
+        case AT_LEAST_ONE, EXISTS -> {
+            if (!p.isNegated() && p.getOperator() == Operator.EQ) {
+                // ∃ == X → NOT ∃ == X
+                out.andWithoutEquals(p.getFieldKey(), p.getValue());
+            } else if (!p.isNegated() && p.getOperator() == Operator.IN) {
+                // ∃ ∈ S → NOT ∃ ∈ S
+                out.andWithoutIn(p.getFieldKey(), p.getValues());
+            } else if (p.isNegated() && p.getOperator() == Operator.IN) {
+                // ∃ ∉ S → ALL ∈ S (approx; refine if you model counts)
+                out.andWithAllInOnly(p.getFieldKey(), p.getValues());
+            } else if (p.isNegated() && p.getOperator() == Operator.EQ) {
+                // ∃ != X → ALL == X
+                out.andWithAllEquals(p.getFieldKey(), p.getValue());
+            } else {
+                out.andWithPredicate(p.toPositivePredicate());
+            }
+        }
+        default -> out.andWithPredicate(p.toPositivePredicate());
+    }
+}
