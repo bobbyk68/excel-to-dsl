@@ -1,124 +1,73 @@
-public void collectAll(List<RuleRow> rows, DslWriter dsl) {
-    for (RuleRow row : rows) {
-        // Compose first (your existing calls)
-        AtomicHit ifHit   = matcher.matchIf(row.ifCondition());
-        AtomicHit thenHit = matcher.matchThen(row.thenCondition());
-        ConstraintCase kase = ConstraintCase.fromEnglish(row.thenCondition());
+enum AnchorScope { DECL, GI, SUBROW }                // where this hit lives
+enum Operator    { EQ, IN }                          // keep small; use negated flag
+enum Quantifier  { EXISTS, ALL, NONE, EXACTLY }      // EXACTLY for future "must be exactly 2"
+enum FieldKey {                                      // canonical targets
+    AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE
+}
+enum PatternKind {                                   // normalised pattern after parse
+    MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL,
+    ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN
+}
 
-        HyphenTwoPhaseComposer.Result ifRes   = null;
-        HyphenTwoPhaseComposer.Result thenRes = null;
+// ──────────────────────────────────────────────
+// NEW: semantic fields used by the emitter
+// ──────────────────────────────────────────────
+private final FieldKey fieldKey;        // e.g. AD_TYPE_CODE, SP_CODE, ...
+private final AnchorScope anchorScope;  // GI for all GoodsItem.* lines
+private final String anchorPath;        // e.g. "GoodsItem.additionalDocuments"
+private final Operator operator;        // EQ or IN
+private final Quantifier quantifier;    // EXISTS/ALL/...
+private final boolean negated;          // from wording: "must not", "none of", etc.
+private final List<String> values;      // normalised multi-value set (derived from groups)
+private final PatternKind patternKind;  // convenience for switch in emitter
+private final Integer exactCount;       // nullable; for "exactly N" (future)
 
-        if (ifHit  != null) ifRes  = composer.composeEnglish(HyphenTwoPhaseComposer.Role.IF,   kase, ifHit.template,  ifHit.groups,  null);
-        if (thenHit!= null) thenRes= composer.composeEnglish(HyphenTwoPhaseComposer.Role.THEN, kase, thenHit.template,thenHit.groups,null);
+public FieldKey fieldKey()         { return fieldKey; }
+public AnchorScope anchorScope()   { return anchorScope; }
+public String anchorPath()         { return anchorPath; }
+public Operator operator()         { return operator; }
+public Quantifier quantifier()     { return quantifier; }
+public boolean isNegated()         { return negated; }
+public List<String> values()       { return values; }
+public String value()              { return values.isEmpty() ? null : values.get(0); }
+public PatternKind patternKind()   { return patternKind; }
+public Integer exactCount()        { return exactCount; }
 
-        // Decide using the composed lines (not raw Excel)
-        if (touchesAdditionalDocs(ifRes, thenRes)) {
-            emitAdditionalDocsFromComposed(ifRes, thenRes, row, dsl);
-        } else {
-            // Default: emit composed lines as-is
-            if (ifRes  != null && ifRes.dslrLines  != null) for (String s : ifRes.dslrLines)  dsl.whenAnchor(s);
-            if (thenRes!= null && thenRes.dslrLines!= null && !thenRes.dslrLines.isEmpty())
-                dsl.thenAnchor(thenRes.dslrLines.get(0)); // or loop if you normally emit more
-        }
 
-        dsl.endRule(row.id());
+enum AnchorScope { DECL, GI, SUBROW }         // declaration / same goods item / same sub-row
+enum Operator    { EQ, IN }                   // keep small; combine with negated flag
+enum Quantifier  { EXISTS, ALL, NONE, EXACTLY_ONE }
+enum FieldKey    { AD_EXEMPTION_CODE, AD_TYPE_CODE, SP_CODE, AI_CODE }
+enum PatternKind { MUST_NOT_ONE_OF, ALL_MUST_NOT_ONE_OF, AT_LEAST_ONE_MUST_EQUAL, ALL_MUST_EQUAL, AT_LEAST_ONE_IN, UNKNOWN }
+
+for (CompiledAtomic ca : compiled) {
+    Matcher m = ca.regex().matcher(literal);
+    if (m.matches()) {
+        List<String> substituted = substituteAll(List.of(ca.dsl()), m);
+        List<String> groups = new ArrayList<>(m.groupCount());
+        for (int i = 1; i <= m.groupCount(); i++) groups.add(m.group(i).trim());
+
+        // ✳️ NEW: pull semantics from the compiled pattern’s metadata
+        FieldKey fieldKey       = ca.fieldKey();        // e.g. AD_TYPE_CODE
+        AnchorScope anchorScope = AnchorScope.GI;       // all GoodsItem.* → GI
+        String anchorPath       = ca.anchorPath();      // "GoodsItem.additionalDocuments"
+        Operator operator       = ca.operator();        // EQ / IN
+        Quantifier quantifier   = ca.quantifier();      // EXISTS / ALL / ...
+        boolean negated         = ca.negated();         // from “must not…”
+        PatternKind patternKind = ca.patternKind();     // MUST_NOT_ONE_OF, etc.
+
+        AtomicHit hit = new AtomicHit(
+            ca.dsl(), substituted.get(0), groups, isIf, literal,
+            fieldKey, anchorScope, anchorPath, operator, quantifier, negated, patternKind
+        );
+        cache.put(literal, hit);
+        return hit;
     }
 }
 
 
-// Coalesce additional-docs across IF+THEN *after* compose.
-// Emits: WHEN header + IF dashes + THEN (negated) dashes + THEN header.
-private void emitAdditionalDocsFromComposed(HyphenTwoPhaseComposer.Result ifRes,
-                                            HyphenTwoPhaseComposer.Result thenRes,
-                                            RuleRow row,
-                                            DslWriter dsl) {
+emitAdditionalDocForCom(HyphenComposer.Result ifRes,
+                        HyphenComposer.Result thenRes,
+                        RuleRow row,
+                        DslrWriter dslrWriter)
 
-    // 1) Extract from composed lines: exception/type codes on IF and THEN
-    var ifExc  = extractCodesByKind(ifRes  == null ? null : ifRes.dslrLines,  "exception");
-    var ifType = extractCodesByKind(ifRes  == null ? null : ifRes.dslrLines,  "type");
-    var thExc  = extractCodesByKind(thenRes== null ? null : thenRes.dslrLines,"exception");
-    var thType = extractCodesByKind(thenRes== null ? null : thenRes.dslrLines,"type");
-
-    // 2) Apply merged CSV to THEN side if we truly merged
-    String mergedCsv = row.mergedThenCodesCsv();
-    boolean hasMerged = row.mergeGroupSize() > 1 && notBlank(mergedCsv);
-    if (hasMerged) {
-        var merged = splitCsv(mergedCsv);
-        if (!thExc.isEmpty()) { thExc.clear(); thExc.addAll(merged); }
-        else                  { thType.clear(); thType.addAll(merged); } // default to type if no explicit exc
-    }
-
-    // 3) If nothing to coalesce, fall back to original composed lines
-    if (ifExc.isEmpty() && ifType.isEmpty() && thExc.isEmpty() && thType.isEmpty()) {
-        if (ifRes   != null && ifRes.dslrLines   != null) for (String s : ifRes.dslrLines)   dsl.whenAnchor(s);
-        if (thenRes != null && thenRes.dslrLines != null && !thenRes.dslrLines.isEmpty())
-            dsl.thenAnchor(thenRes.dslrLines.get(0));
-        return;
-    }
-
-    // 4) Emit: one WHEN header + dashes
-    dsl.whenAnchor("Goods item with additional documents exists");
-
-    // IF (positive) dashes
-    if (!ifExc.isEmpty())  dsl.whenAnchor("- with exception code equals " + joinCsv(ifExc));
-    if (!ifType.isEmpty()) dsl.whenAnchor("- with type code equals "      + joinCsv(ifType));
-
-    // THEN (negated) dashes
-    if (!thExc.isEmpty())  dsl.whenAnchor("- without exception code in " + joinCsv(thExc));
-    if (!thType.isEmpty()) dsl.whenAnchor("- without type code in "      + joinCsv(thType));
-
-    // 5) THEN header (keep your composed header)
-    if (thenRes != null && thenRes.dslrLines != null && !thenRes.dslrLines.isEmpty()) {
-        dsl.thenAnchor(thenRes.dslrLines.get(0));
-    }
-}
-
-
-// Decide based on composed English
-private boolean touchesAdditionalDocs(HyphenTwoPhaseComposer.Result ifRes,
-                                      HyphenTwoPhaseComposer.Result thenRes) {
-    return containsAdditionalDocs(ifRes) || containsAdditionalDocs(thenRes);
-}
-private boolean containsAdditionalDocs(HyphenTwoPhaseComposer.Result res) {
-    if (res == null || res.dslrLines == null) return false;
-    for (String s : res.dslrLines)
-        if (s != null && s.toLowerCase().contains("additional document")) return true; // handles singular/plural
-    return false;
-}
-
-// Pull codes for a given kind ("exception" or "type") from composed lines.
-// Matches “… exception code … equals ABC” or “… type code … in A,B,C”
-private java.util.LinkedHashSet<String> extractCodesByKind(java.util.List<String> lines, String kind) {
-    java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
-    if (lines == null || lines.isEmpty()) return out;
-
-    java.util.regex.Pattern p = java.util.regex.Pattern.compile(
-        "(?i)\\b" + kind + "\\s*code\\b.*?\\b(?:equals|in)\\b\\s*([A-Za-z0-9_,\\-]+)"
-    );
-
-    for (String line : lines) {
-        if (line == null) continue;
-        java.util.regex.Matcher m = p.matcher(line);
-        while (m.find()) {
-            String g = m.group(1);
-            if (g == null) continue;
-            for (String tok : g.split("\\s*,\\s*")) {
-                tok = tok.trim();
-                if (!tok.isEmpty()) out.add(tok);
-            }
-        }
-    }
-    return out;
-}
-
-private java.util.LinkedHashSet<String> splitCsv(String csv) {
-    java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
-    if (csv == null || csv.isBlank()) return out;
-    for (String t : csv.split("\\s*,\\s*")) {
-        t = t.trim();
-        if (!t.isEmpty()) out.add(t);
-    }
-    return out;
-}
-private String joinCsv(java.util.LinkedHashSet<String> set) { return String.join(",", set); }
-private boolean notBlank(String s){ return s != null && !s.isBlank(); }
