@@ -1,68 +1,151 @@
-public final class CompiledAtomic {
-    private final String id;
-    private final java.util.regex.Pattern regex;
-    private final String pattern;   // your original pattern text
-    private final String dsl;       // canonical English template
-    private final uk.gov.hmrc.pattern.PatternIntrospector.Meta meta; // cached
+// ... existing code above ...
 
-    private CompiledAtomic(String id,
-                           java.util.regex.Pattern regex,
-                           String pattern,
-                           String dsl,
-                           uk.gov.hmrc.pattern.PatternIntrospector.Meta meta) {
-        this.id = id;
-        this.regex = regex;
-        this.pattern = pattern;
-        this.dsl = dsl;
-        this.meta = meta;
-    }
+// 2) Canonical path (as before)
+Matcher pm = Pattern
+    .compile("(GoodsItem(?:\\.[A-Za-z]+){1,3}\\.code|Declaration\\.[A-Za-z\\.]+)")
+    .matcher(t);
+String canonicalPath = pm.find() ? pm.group(1) : "";
 
-    public static CompiledAtomic compile(String id, String regexSource, String pattern, String dsl) {
-        java.util.regex.Pattern rx = java.util.regex.Pattern.compile(regexSource);
-        uk.gov.hmrc.pattern.PatternIntrospector.Meta meta =
-            uk.gov.hmrc.pattern.PatternIntrospector.parse(dsl);
+// 3) FieldKey (fallback by label if no path)
+FieldKey fk = fieldKeyOf(canonicalPath);
+if (fk == FieldKey.UNKNOWN) {
+    if (lower.contains("exemption code"))              fk = FieldKey.AD_EXEMPTION_CODE;
+    else if (lower.contains("type code"))              fk = FieldKey.AD_TYPE_CODE;
+    else if (lower.contains("special procedure code")) fk = FieldKey.SP_CODE;
+    else if (lower.contains("additional-information code")
+          || lower.contains("additional information code")) fk = FieldKey.AI_CODE;
+}
 
-        // Safe defaults if parsing didn’t recognise the template/path
-        if (meta == null) {
-            meta = new uk.gov.hmrc.pattern.PatternIntrospector.Meta(
-                    uk.gov.hmrc.pattern.PatternIntrospector.AnchorScope.GI, // assume GI as last resort
-                    "GoodsItem",
-                    uk.gov.hmrc.pattern.PatternIntrospector.FieldKey.UNKNOWN,
-                    uk.gov.hmrc.pattern.PatternIntrospector.Operator.EQ,
-                    uk.gov.hmrc.pattern.PatternIntrospector.Quantifier.EXISTS,
-                    false,
-                    uk.gov.hmrc.pattern.PatternIntrospector.PatternKind.UNKNOWN
-            );
+// 4) Anchor scope + anchor path (fallbacks for pretty IF lines)
+AnchorScope scope;
+String anchorPath;
+
+if (canonicalPath.startsWith("GoodsItem.")) {
+    scope = AnchorScope.GI;
+    anchorPath = computeAnchorPath(canonicalPath);
+} else if (lower.startsWith("goods item with additional document exists")) {
+    scope = AnchorScope.GI;
+    anchorPath = "GoodsItem.additionalDocuments";
+} else if (lower.startsWith("goods item with special procedure exists")) {
+    scope = AnchorScope.GI;
+    anchorPath = "GoodsItem.specialProcedures";
+} else if (lower.startsWith("goods item with additional information exists")) {
+    scope = AnchorScope.GI;
+    anchorPath = "GoodsItem.additionalInformation";
+} else if (fk == FieldKey.AD_EXEMPTION_CODE || fk == FieldKey.AD_TYPE_CODE) {
+    // Field implies the collection
+    scope = AnchorScope.GI;
+    anchorPath = "GoodsItem.additionalDocuments";
+} else if (fk == FieldKey.SP_CODE) {
+    scope = AnchorScope.GI;
+    anchorPath = "GoodsItem.specialProcedures";
+} else if (fk == FieldKey.AI_CODE) {
+    scope = AnchorScope.GI;
+    anchorPath = "GoodsItem.additionalInformation";
+} else {
+    scope = AnchorScope.DECL;
+    anchorPath = "Declaration";
+}
+
+// 5) Operator + negation (unchanged but add "without" → neg)
+Operator op;
+boolean neg;
+if (lower.contains("one of") || lower.matches(".*\\bin\\b.*")) {
+    op  = Operator.IN;
+    neg = lower.contains("must not") || lower.contains("not one of") || lower.contains("without");
+} else {
+    op  = Operator.EQ;
+    neg = lower.contains("must not equal") || lower.contains("not equal") || lower.startsWith("without ");
+}
+
+// 6) Classify patternKind (unchanged)
+PatternKind kind = classify(op, q, neg);
+
+return new Meta(scope, anchorPath, fk, op, q, neg, kind);
+
+
+// choose the declaration anchor path for the IF block
+private String computeAnchorPathFromIf(List<ResultAdapters.ResolvedClause> list) {
+    for (ResultAdapters.ResolvedClause c : list) {
+        if (c.meta().anchorScope() == PatternIntrospector.AnchorScope.GI
+                && c.meta().anchorPath() != null
+                && c.meta().anchorPath().startsWith("GoodsItem")) {
+            return c.meta().anchorPath();
         }
-        return new CompiledAtomic(id, rx, pattern, dsl, meta);
     }
+    // Fallback from field labels (if we didn’t see an explicit anchor line)
+    for (ResultAdapters.ResolvedClause c : list) {
+        switch (c.meta().fieldKey()) {
+            case AD_EXEMPTION_CODE:
+            case AD_TYPE_CODE: return "GoodsItem.additionalDocuments";
+            case SP_CODE:      return "GoodsItem.specialProcedures";
+            case AI_CODE:      return "GoodsItem.additionalInformation";
+            default: break;
+        }
+    }
+    return null; // no GI context
+}
 
-    // getters used elsewhere
-    public String id() { return id; }
-    public java.util.regex.Pattern regex() { return regex; }
-    public String pattern() { return pattern; }
-    public String dsl() { return dsl; }
-    public uk.gov.hmrc.pattern.PatternIntrospector.Meta meta() { return meta; }
+// pick the first IF predicate line that actually has a field & value
+private ResultAdapters.ResolvedClause firstPredicateForContext(List<ResultAdapters.ResolvedClause> list) {
+    for (ResultAdapters.ResolvedClause c : list) {
+        if (c.meta().fieldKey() != PatternIntrospector.FieldKey.UNKNOWN
+                && c.value() != null && !c.value().isEmpty()) {
+            return c;
+        }
+    }
+    return null;
 }
 
 
-List<CompiledAtomic> compiled = bundle.atomic().stream()
-    .map(a -> CompiledAtomic.compile(
-            a.id(),
-            "^" + a.pattern() + "$",   // same as before, anchored regex
-            a.pattern(),
-            a.dsl()))
-    .collect(Collectors.toList());
+void emitAdditionalDocForCom(HyphenTwoPhaseComposer.Result ifRes,
+                             HyphenTwoPhaseComposer.Result thenRes,
+                             RuleRow row,
+                             DslrWriter dslrWriter) {
 
+    List<ResultAdapters.ResolvedClause> ifClauses   = ResultAdapters.resolve(ifRes);
+    List<ResultAdapters.ResolvedClause> thenClauses = ResultAdapters.resolve(thenRes);
+    if (ifClauses == null || ifClauses.isEmpty()) return;
 
-AtomicHit hit = new AtomicHit(ca.dsl(), substituted.get(0), groups, isIf, literal);
+    // 1) Anchor path from IF (works for pretty anchor lines)
+    String anchorPath = computeAnchorPathFromIf(ifClauses);
+    if (anchorPath == null) return; // anchored semantics need GI
 
-// NEW: enrich from cached meta (no JSON changes anywhere)
-uk.gov.hmrc.pattern.PatternIntrospector.Meta meta = ca.meta();
-hit.setAnchorScope(meta.anchorScope())
-   .setAnchorPath(meta.anchorPath())
-   .setFieldKey(meta.fieldKey())
-   .setOperator(meta.operator())
-   .setQuantifier(meta.quantifier())
-   .setNegated(meta.negated())
-   .setPatternKind(meta.patternKind());
+    // 2) Predicate for the context (e.g., exemption == "UE")
+    ResultAdapters.ResolvedClause ctxPred = firstPredicateForContext(ifClauses);
+    if (ctxPred == null) return;
+
+    dslrWriter.whenGoodsItemExists(anchorPath);
+    dslrWriter.andWithEquals(ctxPred.meta().fieldKey(), ctxPred.value());
+
+    // 3) THEN → anchored violation triggers (unchanged switch you already have)
+    for (ResultAdapters.ResolvedClause p : thenClauses) {
+        PatternIntrospector.PatternKind kind = p.meta().patternKind();
+        Object field = p.meta().fieldKey();
+        List<String> vals = p.values();
+
+        switch (kind) {
+            case MUST_NOT_ONE_OF:
+            case ALL_MUST_NOT_ONE_OF:
+                if (vals != null && !vals.isEmpty()) dslrWriter.andWithIn(field, vals);
+                else if (p.value() != null)          dslrWriter.andWithEquals(field, p.value());
+                break;
+
+            case AT_LEAST_ONE_MUST_EQUAL:
+                dslrWriter.andWithoutEquals(field, p.value());
+                break;
+
+            case ALL_MUST_EQUAL:
+                dslrWriter.andWithNotEquals(field, p.value());
+                break;
+
+            case AT_LEAST_ONE_IN:
+                if (vals != null && !vals.isEmpty()) dslrWriter.andWithoutIn(field, vals);
+                else if (p.value() != null)          dslrWriter.andWithoutEquals(field, p.value());
+                break;
+
+            default:
+                emitGenericAnchoredViolation(dslrWriter, p); // your existing fallback
+        }
+    }
+}
