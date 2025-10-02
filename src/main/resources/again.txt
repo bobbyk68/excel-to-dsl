@@ -1,119 +1,106 @@
-package uk.gov.hmrc.pattern;
+// imports you’ll need at top of file:
+// import java.util.List;
+// import uk.gov.hmrc.dsl.DslrWriter;
+// import uk.gov.hmrc.pattern.PatternIntrospector;
+// import uk.gov.hmrc.pattern.ResultAdapters;
+// import uk.gov.hmrc.pattern.ResultAdapters.ResolvedClause;
 
-import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+void emitAdditionalDocForCom(HyphenTwoPhaseComposer.Result ifRes,
+                             HyphenTwoPhaseComposer.Result thenRes,
+                             RuleRow row,
+                             DslrWriter dslrWriter) {
 
-/**
- * Bridges HyphenTwoPhaseComposer.Result → parsed clauses you can reason about.
- * - Uses PatternIntrospector.parse(...) to classify each English line.
- * - Extracts values like UE, 72M, D005,D008... robustly.
- */
-public final class ResultAdapters {
+    // 1) Resolve raw English into parsed clauses (op, q, neg, fieldKey, anchor, values)
+    List<ResolvedClause> ifClauses   = ResultAdapters.resolve(ifRes);
+    List<ResolvedClause> thenClauses = ResultAdapters.resolve(thenRes);
+    if (ifClauses == null || ifClauses.isEmpty()) return;
 
-    /** One resolved (parsed) English line. */
-    public static final class ResolvedClause {
-        private final String raw;                           // original English line
-        private final PatternIntrospector.Meta meta;        // op, q, neg, fieldKey, anchor, kind
-        private final List<String> values;                  // extracted values (order-preserving, deduped)
+    // 2) Choose the GoodsItem anchor from IF
+    String anchorPath = computeAnchorPathFromIf(ifClauses);
+    if (anchorPath == null) return; // no GI context → don’t emit an anchored rule
 
-        public ResolvedClause(String raw, PatternIntrospector.Meta meta, List<String> values) {
-            this.raw = raw; this.meta = meta; this.values = values;
+    // 3) Pick a concrete IF predicate (field+value) for context (e.g., “exemption == UE”)
+    ResolvedClause ctx = firstPredicateForContext(ifClauses);
+    if (ctx == null) return;
+
+    // 4) Start WHEN at the anchor and add the IF context predicate
+    dslrWriter.whenGoodsItemExists(anchorPath);
+    dslrWriter.andWithEquals(ctx.meta().fieldKey(), ctx.value());
+
+    // 5) Convert THEN policy lines into anchored violation triggers
+    for (ResolvedClause p : thenClauses) {
+        String rawLower = p.raw() == null ? "" : p.raw().toLowerCase();
+
+        // 5a) Ignore any anchor-ish English line that may appear in THEN by mistake
+        if (rawLower.startsWith("goods item with ") && rawLower.endsWith(" exists")) continue;
+
+        // 5b) Skip unknown AND valueless predicates
+        boolean noValues = p.values() == null || p.values().isEmpty();
+        boolean noValue  = p.value() == null || p.value().isEmpty();
+        boolean unknown  = p.meta().fieldKey() == PatternIntrospector.FieldKey.UNKNOWN;
+        if (unknown && noValues && noValue) continue;
+
+        // 5c) Deterministic mapping (policy → violation)
+        PatternIntrospector.PatternKind kind = p.meta().patternKind();
+        Object field = p.meta().fieldKey();
+
+        switch (kind) {
+            case MUST_NOT_ONE_OF:        // “… must not be one of S”  (IN, *, neg=true)
+            case ALL_MUST_NOT_ONE_OF:    // “… all … must not be one of S”
+                if (!noValues) dslrWriter.andWithIn(field, p.values());     // witness ∈ S
+                else if (!noValue) dslrWriter.andWithEquals(field, p.value());
+                break;
+
+            case AT_LEAST_ONE_MUST_EQUAL: // “at least one … must equal X” (EQ, EXISTS, neg=false)
+                dslrWriter.andWithoutEquals(field,
+                        !noValue ? p.value() : (!noValues ? p.values().get(0) : ""));
+                break;
+
+            case AT_LEAST_ONE_IN:        // “at least one … in S” (IN, EXISTS, neg=false)
+                if (!noValues) dslrWriter.andWithoutIn(field, p.values());  // none ∈ S
+                else if (!noValue) dslrWriter.andWithoutEquals(field, p.value());
+                break;
+
+            case ALL_MUST_EQUAL:         // “all … must equal X” (EQ, ALL, neg=false)
+                dslrWriter.andWithNotEquals(field,
+                        !noValue ? p.value() : (!noValues ? p.values().get(0) : ""));
+                break;
+
+            default:
+                // Conservative fallback: use your existing generic inverter
+                emitGenericAnchoredViolation(dslrWriter, p);
         }
-        public String raw() { return raw; }
-        public PatternIntrospector.Meta meta() { return meta; }
-        public List<String> values() { return values; }
-        public String value() { return (values == null || values.isEmpty()) ? null : values.get(0); }
-
-        @Override public String toString() {
-            return "ResolvedClause{raw='" + raw + "', op=" + meta.operator() + ", q=" + meta.quantifier() +
-                   ", neg=" + meta.negated() + ", kind=" + meta.patternKind() +
-                   ", field=" + meta.fieldKey() + ", anchor=" + meta.anchorPath() +
-                   ", values=" + values + "}";
-        }
-    }
-
-    /** Turn the composer result into a list of ResolvedClause (one per DSLR line). */
-    public static List<ResolvedClause> resolve(HyphenTwoPhaseComposer.Result res) {
-        if (res == null || res.dslrLines == null || res.dslrLines.isEmpty()) return Collections.emptyList();
-        List<ResolvedClause> out = new ArrayList<ResolvedClause>(res.dslrLines.size());
-        for (String line : res.dslrLines) {
-            String ln = (line == null) ? "" : line.trim();
-            // Defensive: ignore purely decorative bullets like "- "
-            if (ln.equals("-") || ln.equals("- ")) continue;
-
-            PatternIntrospector.Meta meta = PatternIntrospector.parse(ln);
-            List<String> vals = extractValues(ln);
-            out.add(new ResolvedClause(ln, meta, vals));
-        }
-        return out;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Value extraction helpers (robust, order-preserving, deduping)
-    // ─────────────────────────────────────────────────────────────────────
-
-    /** Extract values like "UE", "72M", "D005","D008" from a single English line. */
-    static List<String> extractValues(String line) {
-        if (line == null) return Collections.emptyList();
-        String src = line.trim();
-        if (src.isEmpty()) return Collections.emptyList();
-
-        // 1) Prefer quoted tokens: "D005","D008"
-        Matcher qm = Pattern.compile("\"([^\"]+)\"").matcher(src);
-        List<String> quoted = new ArrayList<String>();
-        while (qm.find()) quoted.add(qm.group(1).trim());
-        if (!quoted.isEmpty()) return dedupeStable(quoted);
-
-        String lower = src.toLowerCase();
-        int idx;
-
-        // 2) After 'equals '
-        if ((idx = lower.indexOf("equals ")) >= 0) {
-            String tail = src.substring(idx + "equals ".length()).trim();
-            if (tail.isEmpty()) return Collections.emptyList(); // avoid ""
-            return dedupeStable(splitCodes(tail));
-        }
-
-        // 3) After 'one of '
-        if ((idx = lower.indexOf("one of ")) >= 0) {
-            String tail = src.substring(idx + "one of ".length());
-            return dedupeStable(splitCodes(tail));
-        }
-
-        // 4) Last ' in ' (word-bounded, catches: " in D005, D008")
-        if ((idx = lastIndexOfWord(lower, " in ")) >= 0) {
-            String tail = src.substring(idx + " in ".length());
-            return dedupeStable(splitCodes(tail));
-        }
-
-        return Collections.emptyList();
-    }
-
-    /** Return last index of needle with surrounding spaces (simple word boundary). */
-    private static int lastIndexOfWord(String haystack, String needleWithSpaces) {
-        return haystack.lastIndexOf(needleWithSpaces);
-    }
-
-    /** Split tokens like D005, D008, 72M. Allows A–Z, a–z, 0–9, '.', '_', '/', '-' */
-    private static List<String> splitCodes(String s) {
-        List<String> out = new ArrayList<String>();
-        String[] parts = s.split("[,\\s]+");
-        for (int i = 0; i < parts.length; i++) {
-            String t = parts[i].trim();
-            if (!t.isEmpty() && t.matches("[A-Za-z0-9._/-]+")) out.add(t);
-        }
-        return out;
-    }
-
-    /** Keep first occurrences, preserve order. */
-    private static List<String> dedupeStable(List<String> in) {
-        if (in == null || in.isEmpty()) return Collections.emptyList();
-        LinkedHashSet<String> set = new LinkedHashSet<String>(in);
-        return new ArrayList<String>(set);
     }
 }
 
 
-List<ResultAdapters.ResolvedClause> ifClauses   = ResultAdapters.resolve(ifRes);
-List<ResultAdapters.ResolvedClause> thenClauses = ResultAdapters.resolve(thenRes);
+private String computeAnchorPathFromIf(List<ResolvedClause> list) {
+    if (list == null) return null;
+    // prefer explicit anchor phrases parsed from English
+    for (ResolvedClause c : list) {
+        String ap = c.meta().anchorPath();
+        if (ap != null && ap.startsWith("GoodsItem")) return ap;
+    }
+    // infer from the first recognisable field in IF (robust fallback)
+    for (ResolvedClause c : list) {
+        switch (c.meta().fieldKey()) {
+            case AD_EXEMPTION_CODE:
+            case AD_TYPE_CODE: return "GoodsItem.additionalDocuments";
+            case SP_CODE:      return "GoodsItem.specialProcedures";
+            case AI_CODE:      return "GoodsItem.additionalInformation";
+            default: // keep looking
+        }
+    }
+    return null;
+}
+
+private ResultAdapters.ResolvedClause firstPredicateForContext(List<ResolvedClause> list) {
+    if (list == null) return null;
+    for (ResolvedClause c : list) {
+        if (c.meta().fieldKey() != PatternIntrospector.FieldKey.UNKNOWN &&
+            c.value() != null && !c.value().isEmpty()) {
+            return c;
+        }
+    }
+    return null;
+}
