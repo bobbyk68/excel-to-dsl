@@ -1,141 +1,119 @@
-// Parse one DSLR/English line into semantic metadata (Java 8 style).
-public static Meta parse(String english) {
-    if (english == null) english = "";
-    final String t = english.trim();
-    final String lower = t.toLowerCase();
+package uk.gov.hmrc.pattern;
 
-    // 1) Quantifier
-    Quantifier q;
-    if (lower.startsWith("all "))                           q = Quantifier.ALL;
-    else if (lower.startsWith("none "))                     q = Quantifier.NONE;
-    else if (lower.startsWith("exactly one "))              q = Quantifier.EXACTLY_ONE;
-    else if (lower.startsWith("there is at least one ")
-          || lower.startsWith("at least one "))            q = Quantifier.EXISTS;
-    else                                                    q = Quantifier.EXISTS;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-    // 2) Canonical (dot) path if present (Excel/raw form). English-only often won’t have this.
-    java.util.regex.Matcher pm = java.util.regex.Pattern
-        .compile("(GoodsItem(?:\\.[A-Za-z]+){1,3}\\.code|Declaration\\.[A-Za-z\\.]+)")
-        .matcher(t);
-    String canonicalPath = pm.find() ? pm.group(1) : "";
+/**
+ * Bridges HyphenTwoPhaseComposer.Result → parsed clauses you can reason about.
+ * - Uses PatternIntrospector.parse(...) to classify each English line.
+ * - Extracts values like UE, 72M, D005,D008... robustly.
+ */
+public final class ResultAdapters {
 
-    // 3) FieldKey: prefer canonical, else infer from English label words
-    FieldKey fk = fieldKeyOf(canonicalPath);
-    if (fk == FieldKey.UNKNOWN) fk = fieldKeyFromLabel(lower);
+    /** One resolved (parsed) English line. */
+    public static final class ResolvedClause {
+        private final String raw;                           // original English line
+        private final PatternIntrospector.Meta meta;        // op, q, neg, fieldKey, anchor, kind
+        private final List<String> values;                  // extracted values (order-preserving, deduped)
 
-    // 4) Anchor scope/path (GI = GoodsItem). Prefer canonical; else infer from English anchor phrase or field.
-    AnchorScope scope;
-    String anchorPath;
-    if (canonicalPath.startsWith("GoodsItem.")) {
-        scope = AnchorScope.GI;
-        anchorPath = computeAnchorPath(canonicalPath); // e.g., GoodsItem.additionalDocuments
-    } else {
-        String byPhrase = anchorPathFromEnglish(lower);
-        if (byPhrase != null) { scope = AnchorScope.GI; anchorPath = byPhrase; }
-        else if (fk == FieldKey.AD_EXEMPTION_CODE || fk == FieldKey.AD_TYPE_CODE) {
-            scope = AnchorScope.GI; anchorPath = "GoodsItem.additionalDocuments";
-        } else if (fk == FieldKey.SP_CODE) {
-            scope = AnchorScope.GI; anchorPath = "GoodsItem.specialProcedures";
-        } else if (fk == FieldKey.AI_CODE) {
-            scope = AnchorScope.GI; anchorPath = "GoodsItem.additionalInformation";
-        } else {
-            scope = AnchorScope.DECL; anchorPath = "Declaration";
+        public ResolvedClause(String raw, PatternIntrospector.Meta meta, List<String> values) {
+            this.raw = raw; this.meta = meta; this.values = values;
+        }
+        public String raw() { return raw; }
+        public PatternIntrospector.Meta meta() { return meta; }
+        public List<String> values() { return values; }
+        public String value() { return (values == null || values.isEmpty()) ? null : values.get(0); }
+
+        @Override public String toString() {
+            return "ResolvedClause{raw='" + raw + "', op=" + meta.operator() + ", q=" + meta.quantifier() +
+                   ", neg=" + meta.negated() + ", kind=" + meta.patternKind() +
+                   ", field=" + meta.fieldKey() + ", anchor=" + meta.anchorPath() +
+                   ", values=" + values + "}";
         }
     }
 
-    // 5) Operator + Negation (robust to wording variants)
-    boolean mentionsSet =
-            lower.contains(" one of ") ||
-            lower.contains(" one-of ") ||
-            lower.matches(".*\\bin\\b.*"); // word-bounded " in "
+    /** Turn the composer result into a list of ResolvedClause (one per DSLR line). */
+    public static List<ResolvedClause> resolve(HyphenTwoPhaseComposer.Result res) {
+        if (res == null || res.dslrLines == null || res.dslrLines.isEmpty()) return Collections.emptyList();
+        List<ResolvedClause> out = new ArrayList<ResolvedClause>(res.dslrLines.size());
+        for (String line : res.dslrLines) {
+            String ln = (line == null) ? "" : line.trim();
+            // Defensive: ignore purely decorative bullets like "- "
+            if (ln.equals("-") || ln.equals("- ")) continue;
 
-    Operator op = mentionsSet ? Operator.IN : Operator.EQ;
-
-    boolean hasNegationIn =
-            lower.contains("must not") ||
-            lower.contains(" not one of") ||
-            lower.contains(" is not one of") ||   // tolerate “is not one of”
-            lower.contains(" be not one of") ||
-            lower.contains(" not in ") ||
-            lower.startsWith("without ") ||
-            lower.contains(" without ");
-
-    boolean neg;
-    if (op == Operator.IN) {
-        // IN + neg=true ⇒ “NOT IN S”
-        neg = hasNegationIn;
-    } else {
-        // EQ negation
-        neg = lower.contains("must not equal")
-           || lower.contains(" not equal")
-           || lower.startsWith("without ");
+            PatternIntrospector.Meta meta = PatternIntrospector.parse(ln);
+            List<String> vals = extractValues(ln);
+            out.add(new ResolvedClause(ln, meta, vals));
+        }
+        return out;
     }
 
-    // 6) Pattern family (drives deterministic flip later)
-    PatternKind kind = classify(op, q, neg);
+    // ─────────────────────────────────────────────────────────────────────
+    // Value extraction helpers (robust, order-preserving, deduping)
+    // ─────────────────────────────────────────────────────────────────────
 
-    return new Meta(scope, anchorPath, fk, op, q, neg, kind);
-}
+    /** Extract values like "UE", "72M", "D005","D008" from a single English line. */
+    static List<String> extractValues(String line) {
+        if (line == null) return Collections.emptyList();
+        String src = line.trim();
+        if (src.isEmpty()) return Collections.emptyList();
 
+        // 1) Prefer quoted tokens: "D005","D008"
+        Matcher qm = Pattern.compile("\"([^\"]+)\"").matcher(src);
+        List<String> quoted = new ArrayList<String>();
+        while (qm.find()) quoted.add(qm.group(1).trim());
+        if (!quoted.isEmpty()) return dedupeStable(quoted);
 
-// For GI paths, return collection-level anchor ("GoodsItem.X")
-private static String computeAnchorPath(String canonicalPath) {
-    if (canonicalPath != null && canonicalPath.startsWith("GoodsItem.")) {
-        String[] p = canonicalPath.split("\\.");
-        if (p.length >= 2) return p[0] + "." + p[1];
+        String lower = src.toLowerCase();
+        int idx;
+
+        // 2) After 'equals '
+        if ((idx = lower.indexOf("equals ")) >= 0) {
+            String tail = src.substring(idx + "equals ".length()).trim();
+            if (tail.isEmpty()) return Collections.emptyList(); // avoid ""
+            return dedupeStable(splitCodes(tail));
+        }
+
+        // 3) After 'one of '
+        if ((idx = lower.indexOf("one of ")) >= 0) {
+            String tail = src.substring(idx + "one of ".length());
+            return dedupeStable(splitCodes(tail));
+        }
+
+        // 4) Last ' in ' (word-bounded, catches: " in D005, D008")
+        if ((idx = lastIndexOfWord(lower, " in ")) >= 0) {
+            String tail = src.substring(idx + " in ".length());
+            return dedupeStable(splitCodes(tail));
+        }
+
+        return Collections.emptyList();
     }
-    if (canonicalPath == null) return "GoodsItem";
-    int dot = canonicalPath.indexOf('.');
-    return dot > 0 ? canonicalPath.substring(0, dot) : canonicalPath;
-}
 
-// Canonical path → FieldKey
-private static FieldKey fieldKeyOf(String canonicalPath) {
-    String s = canonicalPath == null ? "" : canonicalPath.toLowerCase();
-    if (s.contains("additionaldocuments.exemption.code")) return FieldKey.AD_EXEMPTION_CODE;
-    if (s.contains("additionaldocuments.type.code"))      return FieldKey.AD_TYPE_CODE;
-    if (s.contains("specialprocedures.code"))             return FieldKey.SP_CODE;
-    if (s.contains("additionalinformation.code"))         return FieldKey.AI_CODE;
-    return FieldKey.UNKNOWN;
-}
+    /** Return last index of needle with surrounding spaces (simple word boundary). */
+    private static int lastIndexOfWord(String haystack, String needleWithSpaces) {
+        return haystack.lastIndexOf(needleWithSpaces);
+    }
 
-// English label → FieldKey (used when canonical path is missing)
-private static FieldKey fieldKeyFromLabel(String lower) {
-    if (lower.contains("exemption code") || lower.contains("exception code")) return FieldKey.AD_EXEMPTION_CODE;
-    if (lower.contains("type code") || lower.contains("document type"))       return FieldKey.AD_TYPE_CODE;
-    if (lower.contains("special procedure code") || lower.contains("special-procedure code")) return FieldKey.SP_CODE;
-    if (lower.contains("additional-information code") || lower.contains("additional information code")) return FieldKey.AI_CODE;
-    return FieldKey.UNKNOWN;
-}
+    /** Split tokens like D005, D008, 72M. Allows A–Z, a–z, 0–9, '.', '_', '/', '-' */
+    private static List<String> splitCodes(String s) {
+        List<String> out = new ArrayList<String>();
+        String[] parts = s.split("[,\\s]+");
+        for (int i = 0; i < parts.length; i++) {
+            String t = parts[i].trim();
+            if (!t.isEmpty() && t.matches("[A-Za-z0-9._/-]+")) out.add(t);
+        }
+        return out;
+    }
 
-// English anchor phrase → GI anchor path
-private static String anchorPathFromEnglish(String lower) {
-    if (lower.startsWith("goods item with additional document exists"))    return "GoodsItem.additionalDocuments";
-    if (lower.startsWith("goods item with special procedure exists"))      return "GoodsItem.specialProcedures";
-    if (lower.startsWith("goods item with additional information exists")) return "GoodsItem.additionalInformation";
-    return null;
-}
-
-// Pattern family classifier
-private static PatternKind classify(Operator op, Quantifier q, boolean neg) {
-    if (op == Operator.IN && neg && q == Quantifier.ALL)     return PatternKind.ALL_MUST_NOT_ONE_OF;
-    if (op == Operator.IN && neg)                            return PatternKind.MUST_NOT_ONE_OF;
-    if (op == Operator.EQ && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_MUST_EQUAL;
-    if (op == Operator.EQ && !neg && q == Quantifier.ALL)    return PatternKind.ALL_MUST_EQUAL;
-    if (op == Operator.IN && !neg && q == Quantifier.EXISTS) return PatternKind.AT_LEAST_ONE_IN;
-    return PatternKind.UNKNOWN;
+    /** Keep first occurrences, preserve order. */
+    private static List<String> dedupeStable(List<String> in) {
+        if (in == null || in.isEmpty()) return Collections.emptyList();
+        LinkedHashSet<String> set = new LinkedHashSet<String>(in);
+        return new ArrayList<String>(set);
+    }
 }
 
 
-static void dbg(String line) {
-    PatternIntrospector.Meta m = PatternIntrospector.parse(line);
-    System.out.printf("line=%s%n  op=%s q=%s neg=%s kind=%s anchor=%s field=%s%n%n",
-        line, m.operator(), m.quantifier(), m.negated(), m.patternKind(), m.anchorPath(), m.fieldKey());
-}
-
-public static void main(String[] args) {
-    dbg("Goods item with additional document exists");
-    dbg("with exemption code equals UE");
-    dbg("at least one type code must not be one of D005, D008");
-    dbg("at least one special procedure code must equal 72M");
-}
+List<ResultAdapters.ResolvedClause> ifClauses   = ResultAdapters.resolve(ifRes);
+List<ResultAdapters.ResolvedClause> thenClauses = ResultAdapters.resolve(thenRes);
