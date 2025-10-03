@@ -1,106 +1,312 @@
-// imports you’ll need at top of file:
-// import java.util.List;
-// import uk.gov.hmrc.dsl.DslrWriter;
-// import uk.gov.hmrc.pattern.PatternIntrospector;
-// import uk.gov.hmrc.pattern.ResultAdapters;
-// import uk.gov.hmrc.pattern.ResultAdapters.ResolvedClause;
+public interface Emitter {
+    // Higher = takes precedence if multiple canHandle(...) return true
+    int priority();
 
-void emitAdditionalDocForCom(HyphenTwoPhaseComposer.Result ifRes,
-                             HyphenTwoPhaseComposer.Result thenRes,
-                             RuleRow row,
-                             DslrWriter dslrWriter) {
+    boolean canHandle(EmitContext ctx);
 
-    // 1) Resolve raw English into parsed clauses (op, q, neg, fieldKey, anchor, values)
-    List<ResolvedClause> ifClauses   = ResultAdapters.resolve(ifRes);
-    List<ResolvedClause> thenClauses = ResultAdapters.resolve(thenRes);
-    if (ifClauses == null || ifClauses.isEmpty()) return;
+    void emit(EmitContext ctx, DslFileWriter dsl);
+}
 
-    // 2) Choose the GoodsItem anchor from IF
-    String anchorPath = computeAnchorPathFromIf(ifClauses);
-    if (anchorPath == null) return; // no GI context → don’t emit an anchored rule
 
-    // 3) Pick a concrete IF predicate (field+value) for context (e.g., “exemption == UE”)
-    ResolvedClause ctx = firstPredicateForContext(ifClauses);
-    if (ctx == null) return;
+public final class EmitContext {
+    public RuleRow row;            // full Excel-derived row
+    public AtomicHit ifHit;        // parsed IF
+    public AtomicHit thenHit;      // parsed THEN
+    public ConstraintCase kase;    // ALL_OF, ANY_OF, etc.
+    public String combinedTemplate;
+    public List<String> combinedGroup;
+}
 
-    // 4) Start WHEN at the anchor and add the IF context predicate
-    dslrWriter.whenGoodsItemExists(anchorPath);
-    dslrWriter.andWithEquals(ctx.meta().fieldKey(), ctx.value());
 
-    // 5) Convert THEN policy lines into anchored violation triggers
-    for (ResolvedClause p : thenClauses) {
-        String rawLower = p.raw() == null ? "" : p.raw().toLowerCase();
+public final class EmitterRegistry {
+    private final List<Emitter> emitters = new ArrayList<>();
 
-        // 5a) Ignore any anchor-ish English line that may appear in THEN by mistake
-        if (rawLower.startsWith("goods item with ") && rawLower.endsWith(" exists")) continue;
+    public EmitterRegistry register(Emitter e) {
+        emitters.add(e);
+        emitters.sort(Comparator.comparingInt(Emitter::priority).reversed());
+        return this;
+    }
 
-        // 5b) Skip unknown AND valueless predicates
-        boolean noValues = p.values() == null || p.values().isEmpty();
-        boolean noValue  = p.value() == null || p.value().isEmpty();
-        boolean unknown  = p.meta().fieldKey() == PatternIntrospector.FieldKey.UNKNOWN;
-        if (unknown && noValues && noValue) continue;
+    public Emitter resolve(EmitContext ctx) {
+        for (Emitter e : emitters) if (e.canHandle(ctx)) return e;
+        return GenericEmitter.INSTANCE;
+    }
+}
+public final class GenericEmitter implements Emitter {
+    public static final GenericEmitter INSTANCE = new GenericEmitter();
 
-        // 5c) Deterministic mapping (policy → violation)
-        PatternIntrospector.PatternKind kind = p.meta().patternKind();
-        Object field = p.meta().fieldKey();
+    @Override public int priority() { return 0; }
 
-        switch (kind) {
-            case MUST_NOT_ONE_OF:        // “… must not be one of S”  (IN, *, neg=true)
-            case ALL_MUST_NOT_ONE_OF:    // “… all … must not be one of S”
-                if (!noValues) dslrWriter.andWithIn(field, p.values());     // witness ∈ S
-                else if (!noValue) dslrWriter.andWithEquals(field, p.value());
-                break;
+    @Override public boolean canHandle(EmitContext ctx) {
+        return ctx.combinedTemplate != null && ctx.combinedGroup != null;
+    }
 
-            case AT_LEAST_ONE_MUST_EQUAL: // “at least one … must equal X” (EQ, EXISTS, neg=false)
-                dslrWriter.andWithoutEquals(field,
-                        !noValue ? p.value() : (!noValues ? p.values().get(0) : ""));
-                break;
-
-            case AT_LEAST_ONE_IN:        // “at least one … in S” (IN, EXISTS, neg=false)
-                if (!noValues) dslrWriter.andWithoutIn(field, p.values());  // none ∈ S
-                else if (!noValue) dslrWriter.andWithoutEquals(field, p.value());
-                break;
-
-            case ALL_MUST_EQUAL:         // “all … must equal X” (EQ, ALL, neg=false)
-                dslrWriter.andWithNotEquals(field,
-                        !noValue ? p.value() : (!noValues ? p.values().get(0) : ""));
-                break;
-
-            default:
-                // Conservative fallback: use your existing generic inverter
-                emitGenericAnchoredViolation(dslrWriter, p);
-        }
+    @Override public void emit(EmitContext ctx, DslFileWriter dsl) {
+        // Treat combinedTemplate like: "at least one {anchor}.{field} equals {1}"
+        dsl.then(ctx.combinedTemplate, ctx.combinedGroup.toArray(String[]::new));
     }
 }
 
 
-private String computeAnchorPathFromIf(List<ResolvedClause> list) {
-    if (list == null) return null;
-    // prefer explicit anchor phrases parsed from English
-    for (ResolvedClause c : list) {
-        String ap = c.meta().anchorPath();
-        if (ap != null && ap.startsWith("GoodsItem")) return ap;
+
+public final class AdditionalDocsEqualsEmitter implements Emitter {
+
+    private static final Pattern AD_CODE_EQ = Pattern.compile(
+        "additionalDocuments\\.type\\.code\\s+(?:must\\s+)?equals\\s+([A-Za-z0-9]+)",
+        Pattern.CASE_INSENSITIVE);
+
+    @Override public int priority() { return 100; } // outrank generic
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        String thenText = ctx.row.thenCondition();
+        return thenText != null && thenText.toLowerCase().contains("additionaldocuments");
     }
-    // infer from the first recognisable field in IF (robust fallback)
-    for (ResolvedClause c : list) {
-        switch (c.meta().fieldKey()) {
-            case AD_EXEMPTION_CODE:
-            case AD_TYPE_CODE: return "GoodsItem.additionalDocuments";
-            case SP_CODE:      return "GoodsItem.specialProcedures";
-            case AI_CODE:      return "GoodsItem.additionalInformation";
-            default: // keep looking
+
+    @Override public void emit(EmitContext ctx, DslFileWriter dsl) {
+        String code = extractCode(ctx);
+        if (code == null || code.isBlank()) {
+            System.err.println("[AD-EMIT] No code for row " + ctx.row.id());
+            return;
         }
+        // Minimal facts: anchor + requirement
+        dsl.when("there is at least one GoodsItem");
+        dsl.then("at least one GoodsItem.additionalDocuments.type.code equals {code}", code);
     }
-    return null;
+
+    private String extractCode(EmitContext ctx) {
+        // 1) merged list if truly merged
+        List<String> merged = ctx.row.getMergedThenCodes();
+        if (merged != null && !merged.isEmpty()) return merged.get(0);
+
+        // 2) regex over THEN English
+        Matcher m = AD_CODE_EQ.matcher(ctx.row.thenCondition());
+        if (m.find()) return m.group(1);
+
+        // 3) parsed groups
+        if (ctx.thenHit != null && ctx.thenHit.groups() != null && !ctx.thenHit.groups().isEmpty())
+            return ctx.thenHit.groups().get(ctx.thenHit.groups().size() - 1);
+
+        return null;
+    }
 }
 
-private ResultAdapters.ResolvedClause firstPredicateForContext(List<ResolvedClause> list) {
-    if (list == null) return null;
-    for (ResolvedClause c : list) {
-        if (c.meta().fieldKey() != PatternIntrospector.FieldKey.UNKNOWN &&
-            c.value() != null && !c.value().isEmpty()) {
-            return c;
-        }
+
+public final class CountDiffersEmitter implements Emitter {
+
+    @Override public int priority() { return 90; }
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        String pre = ctx.row.getCombinedThenCondition();
+        return pre != null && pre.contains("count differs");
     }
-    return null;
+
+    @Override public void emit(EmitContext ctx, DslFileWriter dsl) {
+        // Example: "Additional information codes {1} count differs from {2}"
+        dsl.then(ctx.row.getCombinedThenCondition(), ctx.row.getMergedThenCodes().toArray(String[]::new));
+    }
+}
+
+
+public final class RequestedPrevProcedureCompositeEmitter implements Emitter {
+
+    // Specific, but less specific than AD → sits just below AD emitter
+    @Override public int priority() { return 95; }
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        // We require BOTH:
+        //  (A) IF mentions requestedProcedure equals {code}
+        //  (B) THEN says previousProcedure code "must is one of" {list}
+        String ifText   = safeLower(ofIf(ctx));
+        String thenText = safeLower(ofThen(ctx));
+        return mentionsRequestedEq(ifText) && mentionsPrevMustOneOf(thenText);
+    }
+
+    @Override public void emit(EmitContext ctx, DslFileWriter dsl) {
+        // 1) Extract requested code
+        String reqCode = extractRequestedCode(ctx);
+        // 2) Extract allowed list on previousProcedure
+        java.util.List<String> allowed = extractPrevAllowedList(ctx);
+
+        if (isBlank(reqCode) || allowed.isEmpty()) {
+            System.err.println("[PROC-EMIT] Missing data for row " + ctx.row.id()
+                + " IF='" + ofIf(ctx) + "' THEN='" + ofThen(ctx) + "'");
+            return;
+        }
+
+        // 3) Emit WHEN block lines (your DSL style)
+        dsl.when("Goods item exists");
+        dsl.when("- with requested procedure code equals \"{code}\"", reqCode);
+        dsl.when("- with previous procedure code not in {csv}", quoteCsv(allowed));
+        // No THEN content here; your framework emits the error line elsewhere
+    }
+
+    // ─── helpers ────────────────────────────────────────────────────────────────
+
+    // Robust regexes
+    private static final java.util.regex.Pattern REQ_EQ =
+        java.util.regex.Pattern.compile(
+            "requested\\s*procedure(?:\\.code)?\\s*equals\\s*\"?([A-Za-z0-9]+)\"?",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private static final java.util.regex.Pattern PREV_ONE_OF =
+        java.util.regex.Pattern.compile(
+            "previous\\s*procedure(?:\\.code)?\\s*must\\s+is\\s+one\\s+of\\s+([A-Za-z0-9,\\s\"]+)",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private String extractRequestedCode(EmitContext ctx) {
+        // Prefer parsed IF hit if present
+        if (ctx.ifHit != null && ctx.ifHit.groups() != null && !ctx.ifHit.groups().isEmpty()) {
+            String last = ctx.ifHit.groups().get(ctx.ifHit.groups().size() - 1);
+            if (!isBlank(last)) return last.replace("\"", "");
+        }
+        // Fallback: regex over IF text
+        java.util.regex.Matcher m = REQ_EQ.matcher(ofIf(ctx));
+        return m.find() ? m.group(1) : null;
+    }
+
+    private java.util.List<String> extractPrevAllowedList(EmitContext ctx) {
+        // Prefer parsed THEN hit groups if they carry the CSV
+        if (ctx.thenHit != null && ctx.thenHit.groups() != null && !ctx.thenHit.groups().isEmpty()) {
+            String csv = ctx.thenHit.groups().get(ctx.thenHit.groups().size() - 1);
+            return normalizeList(csv);
+        }
+        // Fallback: regex over THEN text
+        java.util.regex.Matcher m = PREV_ONE_OF.matcher(ofThen(ctx));
+        if (m.find()) return normalizeList(m.group(1));
+        return java.util.Collections.emptyList();
+    }
+
+    private java.util.List<String> normalizeList(String csv) {
+        if (isBlank(csv)) return java.util.Collections.emptyList();
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String s : csv.replace("\"","").split("[,\\s]+")) {
+            if (!isBlank(s)) out.add(s);
+        }
+        return out;
+    }
+
+    private String quoteCsv(java.util.List<String> items) {
+        return "\"" + String.join("\",\"", items) + "\"";
+    }
+
+    private String ofIf(EmitContext ctx)   { return ctx.row != null ? ctx.row.ifCondition()   : null; }
+    private String ofThen(EmitContext ctx) { return ctx.row != null ? ctx.row.thenCondition() : null; }
+
+    private String safeLower(String s) { return s == null ? "" : s.toLowerCase(); }
+    private boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
+
+    private boolean mentionsRequestedEq(String s) {
+        return s.contains("requestedprocedure") || s.contains("requested procedure");
+    }
+
+    private boolean mentionsPrevMustOneOf(String s) {
+        return s.contains("previousprocedure") || s.contains("previous procedure");
+    }
+}
+
+
+// inside EmitterRegistry.defaultRegistry()
+return new EmitterRegistry()
+    .register(new uk.gov.hmrc.rules.emit.ad.AdditionalDocsEqualsEmitter())        // 100
+    .register(new uk.gov.hmrc.rules.emit.sp.RequestedPrevProcedureCompositeEmitter()) // 95
+    .register(new uk.gov.hmrc.rules.emit.sp.GoodsItemExistsForProcedureEmitter()) // 60 (optional anchor-only)
+    .register(GenericEmitter.INSTANCE);                                           // 0
+
+
+
+public final class RequestedPrevProcedureCompositeEmitter implements Emitter {
+
+    // Specific, but less specific than AD → sits just below AD emitter
+    @Override public int priority() { return 95; }
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        // We require BOTH:
+        //  (A) IF mentions requestedProcedure equals {code}
+        //  (B) THEN says previousProcedure code "must is one of" {list}
+        String ifText   = safeLower(ofIf(ctx));
+        String thenText = safeLower(ofThen(ctx));
+        return mentionsRequestedEq(ifText) && mentionsPrevMustOneOf(thenText);
+    }
+
+    @Override public void emit(EmitContext ctx, DslFileWriter dsl) {
+        // 1) Extract requested code
+        String reqCode = extractRequestedCode(ctx);
+        // 2) Extract allowed list on previousProcedure
+        java.util.List<String> allowed = extractPrevAllowedList(ctx);
+
+        if (isBlank(reqCode) || allowed.isEmpty()) {
+            System.err.println("[PROC-EMIT] Missing data for row " + ctx.row.id()
+                + " IF='" + ofIf(ctx) + "' THEN='" + ofThen(ctx) + "'");
+            return;
+        }
+
+        // 3) Emit WHEN block lines (your DSL style)
+        dsl.when("Goods item exists");
+        dsl.when("- with requested procedure code equals \"{code}\"", reqCode);
+        dsl.when("- with previous procedure code not in {csv}", quoteCsv(allowed));
+        // No THEN content here; your framework emits the error line elsewhere
+    }
+
+    // ─── helpers ────────────────────────────────────────────────────────────────
+
+    // Robust regexes
+    private static final java.util.regex.Pattern REQ_EQ =
+        java.util.regex.Pattern.compile(
+            "requested\\s*procedure(?:\\.code)?\\s*equals\\s*\"?([A-Za-z0-9]+)\"?",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private static final java.util.regex.Pattern PREV_ONE_OF =
+        java.util.regex.Pattern.compile(
+            "previous\\s*procedure(?:\\.code)?\\s*must\\s+is\\s+one\\s+of\\s+([A-Za-z0-9,\\s\"]+)",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private String extractRequestedCode(EmitContext ctx) {
+        // Prefer parsed IF hit if present
+        if (ctx.ifHit != null && ctx.ifHit.groups() != null && !ctx.ifHit.groups().isEmpty()) {
+            String last = ctx.ifHit.groups().get(ctx.ifHit.groups().size() - 1);
+            if (!isBlank(last)) return last.replace("\"", "");
+        }
+        // Fallback: regex over IF text
+        java.util.regex.Matcher m = REQ_EQ.matcher(ofIf(ctx));
+        return m.find() ? m.group(1) : null;
+    }
+
+    private java.util.List<String> extractPrevAllowedList(EmitContext ctx) {
+        // Prefer parsed THEN hit groups if they carry the CSV
+        if (ctx.thenHit != null && ctx.thenHit.groups() != null && !ctx.thenHit.groups().isEmpty()) {
+            String csv = ctx.thenHit.groups().get(ctx.thenHit.groups().size() - 1);
+            return normalizeList(csv);
+        }
+        // Fallback: regex over THEN text
+        java.util.regex.Matcher m = PREV_ONE_OF.matcher(ofThen(ctx));
+        if (m.find()) return normalizeList(m.group(1));
+        return java.util.Collections.emptyList();
+    }
+
+    private java.util.List<String> normalizeList(String csv) {
+        if (isBlank(csv)) return java.util.Collections.emptyList();
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String s : csv.replace("\"","").split("[,\\s]+")) {
+            if (!isBlank(s)) out.add(s);
+        }
+        return out;
+    }
+
+    private String quoteCsv(java.util.List<String> items) {
+        return "\"" + String.join("\",\"", items) + "\"";
+    }
+
+    private String ofIf(EmitContext ctx)   { return ctx.row != null ? ctx.row.ifCondition()   : null; }
+    private String ofThen(EmitContext ctx) { return ctx.row != null ? ctx.row.thenCondition() : null; }
+
+    private String safeLower(String s) { return s == null ? "" : s.toLowerCase(); }
+    private boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
+
+    private boolean mentionsRequestedEq(String s) {
+        return s.contains("requestedprocedure") || s.contains("requested procedure");
+    }
+
+    private boolean mentionsPrevMustOneOf(String s) {
+        return s.contains("previousprocedure") || s.contains("previous procedure");
+    }
 }
