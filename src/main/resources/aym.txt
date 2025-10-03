@@ -1,0 +1,199 @@
+public interface Emitter {
+    int priority();
+    boolean canHandle(EmitContext ctx);
+    void emit(EmitContext ctx, DslOut out);   // ← DslOut here
+}
+
+public final class GoodsItemExistsForProcedureEmitter implements Emitter {
+
+    // Lower than AD emitter; higher than Generic
+    @Override public int priority() { return 60; }
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        // We accept either side (IF or THEN); look for SP/RequestedProc + exists-ish phrasing
+        return mentionsProcAndExists(textOfIf(ctx)) || mentionsProcAndExists(textOfThen(ctx));
+    }
+
+    @Override public void emit(EmitContext ctx, DslFileWriter dsl) {
+        // Emit the minimal anchor. Rely on DslFileWriter’s internal dedupe to avoid duplicates.
+        dsl.when("there is at least one GoodsItem");
+    }
+
+    // ---------- helpers ----------
+
+    private String textOfIf(EmitContext ctx) {
+        String t = (ctx.row != null ? ctx.row.ifCondition() : null);
+        if (t == null && ctx.ifHit != null && ctx.ifHit.template() != null) t = ctx.ifHit.template();
+        return t == null ? "" : t.toLowerCase();
+    }
+
+    private String textOfThen(EmitContext ctx) {
+        String t = (ctx.row != null ? ctx.row.thenCondition() : null);
+        if (t == null && ctx.thenHit != null && ctx.thenHit.template() != null) t = ctx.thenHit.template();
+        return t == null ? "" : t.toLowerCase();
+    }
+
+    private boolean mentionsProcAndExists(String s) {
+        if (s.isEmpty()) return false;
+
+        // Signals that the clause lives under GoodsItem.specialProcedures or requested procedure
+        boolean mentionsProc =
+                s.contains("specialprocedures")           // pathish
+             || s.contains("special procedure")           // english
+             || s.contains("requested_procedure_code")    // token-style
+             || s.contains("requestedprocedure")          // pathish
+             || s.contains("requested procedure");        // english
+
+        // Any of your existence phrasings (tweak as needed)
+        boolean existsish =
+                s.contains(" exists")                     // "exists"
+             || s.contains("there is at least one")       // your standard phrasing
+             || s.contains("is present")                  // future-proof
+             || s.startsWith("goods item exists");        // your new DSL line style
+
+        return mentionsProc && existsish;
+    }
+}
+
+
+// field
+private final EmitterRegistry emitters = EmitterRegistry.defaultRegistry();
+
+
+// Build the context from what you already compute
+EmitContext ctx = EmitContext.of(
+    row,
+    ifHit,                // parsed IF (nullable)
+    thenHit,              // parsed THEN (nullable)
+    kase,                 // ALL_OF / ANY_OF …
+    combineTemplate,      // was used by your monolith
+    combinedGroup         // ditto
+);
+
+// Old: emit(row, dsl, ...)
+emitters.emit(ctx, dsl);  // New: one line
+
+// Resolve once, log, and emit
+Emitter e = emitters.resolve(ctx);
+System.out.println("[EMIT] " + row.id() + " -> " + e.getClass().getSimpleName());
+e.emit(ctx, dsl);
+
+// Lightweight sink the emitters will use.
+// Note: full strings, no templating — emitters format the text themselves.
+public interface DslOut {
+    void when(String line);
+    void then(String line);
+}
+
+public interface Emitter {
+    int priority();
+    boolean canHandle(EmitContext ctx);
+    void emit(EmitContext ctx, DslOut out);   // ← DslOut here
+}
+
+public final class RequestedPrevProcedureCompositeEmitter implements Emitter {
+
+    @Override public int priority() { return 95; }
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        String ifText   = text(ctx.row.ifCondition());
+        String thenText = text(ctx.row.thenCondition());
+        return mentionsRequestedEq(ifText) && mentionsPrevOneOf(thenText);
+    }
+
+    @Override public void emit(EmitContext ctx, DslOut out) {
+        String req = extractRequestedCode(ctx);
+        java.util.List<String> allowed = extractPrevAllowedList(ctx);
+        if (isBlank(req) || allowed.isEmpty()) {
+            System.err.println("[PROC-EMIT] Missing data for row " + ctx.row.id());
+            return;
+        }
+        out.when("Goods item exists");
+        out.when("- with requested procedure code equals \"" + req + "\"");
+        out.when("- with previous procedure code not in " + quoteCsv(allowed));
+        // THEN line is produced by your existing error composer/path.
+    }
+
+    // helpers (same as before, trimmed for brevity) …
+    private String text(String s){ return s==null? "" : s.toLowerCase(); }
+    private boolean isBlank(String s){ return s==null || s.trim().isEmpty(); }
+
+    private boolean mentionsRequestedEq(String s){
+        return s.contains("requestedprocedure") || s.contains("requested procedure");
+    }
+    private boolean mentionsPrevOneOf(String s){
+        return s.contains("previousprocedure") || s.contains("previous procedure");
+    }
+
+    private String extractRequestedCode(EmitContext ctx){
+        if (ctx.ifHit != null && ctx.ifHit.groups()!=null && !ctx.ifHit.groups().isEmpty()) {
+            return ctx.ifHit.groups().get(ctx.ifHit.groups().size()-1).replace("\"","");
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("requested\\s*procedure(?:\\.code)?\\s*equals\\s*\"?([A-Za-z0-9]+)\"?", java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(ctx.row.ifCondition());
+        return m.find()? m.group(1) : null;
+    }
+
+    private java.util.List<String> extractPrevAllowedList(EmitContext ctx){
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("previous\\s*procedure(?:\\.code)?\\s*must\\s+is\\s+one\\s+of\\s+([A-Za-z0-9,\\s\"]+)", java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(ctx.row.thenCondition());
+        if (m.find()) return normalize(m.group(1));
+        return java.util.Collections.emptyList();
+    }
+
+    private java.util.List<String> normalize(String csv){
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String s : csv.replace("\"","").split("[,\\s]+")) if (!isBlank(s)) out.add(s);
+        return out;
+    }
+    private String quoteCsv(java.util.List<String> xs){ return "\"" + String.join("\",\"", xs) + "\""; }
+}
+
+public final class AdditionalDocsEqualsEmitter implements Emitter {
+
+    @Override public int priority() { return 100; }
+
+    @Override public boolean canHandle(EmitContext ctx) {
+        String thenText = ctx.row.thenCondition();
+        return thenText != null && thenText.toLowerCase().contains("additionaldocuments");
+    }
+
+    @Override public void emit(EmitContext ctx, DslOut out) {
+        String code = extractCode(ctx);
+        if (isBlank(code)) {
+            System.err.println("[AD-EMIT] No AdditionalDocuments code for row " + ctx.row.id());
+            return;
+        }
+        out.when("there is at least one GoodsItem");
+        out.then("at least one GoodsItem.additionalDocuments.type.code equals \"" + code + "\"");
+    }
+
+    // helpers …
+    private boolean isBlank(String s){ return s==null || s.trim().isEmpty(); }
+    private String extractCode(EmitContext ctx){
+        if (ctx.row.getMergedThenCodes()!=null && !ctx.row.getMergedThenCodes().isEmpty())
+            return ctx.row.getMergedThenCodes().get(0);
+        java.util.regex.Matcher m = java.util.regex.Pattern
+           .compile("additionalDocuments\\.type\\.code\\s+(?:must\\s+)?equals\\s+([A-Za-z0-9]+)", java.util.regex.Pattern.CASE_INSENSITIVE)
+           .matcher(ctx.row.thenCondition());
+        if (m.find()) return m.group(1);
+        if (ctx.thenHit!=null && ctx.thenHit.groups()!=null && !ctx.thenHit.groups().isEmpty())
+            return ctx.thenHit.groups().get(ctx.thenHit.groups().size()-1);
+        return null;
+    }
+}
+
+
+public final class GenericEmitter implements Emitter {
+    public static final GenericEmitter INSTANCE = new GenericEmitter();
+    @Override public int priority() { return 0; }
+    @Override public boolean canHandle(EmitContext ctx) {
+        return ctx.combinedTemplate != null && ctx.combinedGroup != null;
+    }
+    @Override public void emit(EmitContext ctx, DslOut out) {
+        // If your template is already fully formatted, push it straight in:
+        out.then(ctx.combinedTemplate); // or format with groups if needed
+    }
+}
