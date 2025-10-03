@@ -197,3 +197,23 @@ public final class GenericEmitter implements Emitter {
         out.then(ctx.combinedTemplate); // or format with groups if needed
     }
 }
+
+
+// Put this as a private static inner class inside your composer (the class with collectAll)
+private static final class LocalDslBuffer implements DslOut {
+    private final java.util.List<String> whenLines = new java.util.ArrayList<>();
+    private final java.util.List<String> thenLines = new java.util.ArrayList<>();
+
+    @Override public void when(String line) { if (line != null && !line.isBlank()) whenLines.add(line); }
+    @Override public void then(String line) { if (line != null && !line.isBlank()) thenLines.add(line); }
+
+    // Renders exactly what your current dsl.appendRule(out, row, ...) expects.
+    String asBlock() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("when\n");
+        for (String w : whenLines) sb.append("  ").append(w).append('\n');
+        sb.append("then\n");
+        for (String t : thenLines) sb.append("  ").append(t).append('\n');
+        return sb.toString();
+    }
+}
