@@ -1,158 +1,26 @@
-final String IF   = row.ifCondition();
-final String THEN = row.thenCondition();
+// Minimal adapter so emitXxx(...) doesn't depend directly on DslWriter.
+final class LocalDslBuffer {
+    private final java.util.List<String> whens = new java.util.ArrayList<>();
+    private final java.util.List<String> thens = new java.util.ArrayList<>();
 
-// 1) AD composite (EXEMPTION + TYPE list)  → both must match (AND)
-if (containsAD(IF) && containsAdTypeList(THEN)) {
-    emitAdExemptionTypeList(IF, THEN, ifHit, thenHit, row, out); // flips: forbidden→IN, allowed→NOT IN
-    return;
-}
+    void when(String line) { if (line != null && !line.isBlank()) whens.add(line); }
+    void then(String line) { if (line != null && !line.isBlank()) thens.add(line); }
 
-// 2) AD single equals (THEN-only) → only THEN must match
-if (containsAdTypeEquals(THEN)) {
-    emitAdTypeEquals(THEN, thenHit, row, out); // no flip; equals stays in THEN
-    return;
-}
+    boolean isEmpty() { return whens.isEmpty() && thens.isEmpty(); }
 
-// 3) RP+PP composite (REQUESTED + PREVIOUS list) → both must match (AND)
-if (containsRequested(IF) && containsPreviousAllowed(THEN)) {
-    emitGiRequestedPrevList(IF, THEN, ifHit, thenHit, row, out); // flips to NOT IN
-    return;
-}
-
-// 4) Generic fallback (unchanged)
-if (combineTemplate != null && combinedGroup != null) {
-    out.then(combineTemplate);
-    return;
-}
-
-
-
-
-private boolean containsAD(String s){ return s != null && s.toLowerCase().contains("additionaldocuments."); }
-private boolean containsAdTypeEquals(String s){
-    s = s == null ? "" : s.toLowerCase();
-    return s.contains("additionaldocuments.type.code") && s.contains("equals");
-}
-private boolean containsAdTypeList(String s){
-    s = s == null ? "" : s.toLowerCase();
-    return s.contains("additionaldocuments.type.code")
-        && (s.contains("one of") || s.contains("not one of") || s.contains("must is not one of") || s.contains("must not be one of"));
-}
-private boolean containsRequested(String s){ return s != null && s.toLowerCase().contains("requestedprocedure.code"); }
-private boolean containsPreviousAllowed(String s){
-    s = s == null ? "" : s.toLowerCase();
-    return s.contains("previousprocedure.code") && s.contains("one of");
-}
-
-
-private boolean emitAdExemptionTypeList(
-        String ifText, String thenText,
-        AtomicHit ifHit, AtomicHit thenHit,
-        RuleRow row, DslOut out) {
-
-    String exemption = lastGroup(ifHit);                 // e.g., "UE"
-    if (isBlank(exemption) && row != null) exemption = row.getIfCode(); // if you have such a field
-    java.util.List<String> list = groupsToList(thenHit); // e.g., ["D005", "D008", ...]
-
-    if (isBlank(exemption) || list.isEmpty()) return false;
-
-    String lhs = "Goods item with additional document exists";
-    out.when(lhs + " - with exemption code equals \"" + exemption + "\"");
-
-    boolean forbidden =
-        thenText != null && thenText.toLowerCase().matches(".*(not one of|must is not one of|must not be one of).*");
-
-    String csv = quoteCsv(list);
-    // FORBIDDEN_SET -> violation is IN; ALLOWED_SET -> violation is NOT IN
-    out.when(lhs + " - with type code " + (forbidden ? "in " : "not in ") + csv);
-    return true;
-}
-
-private boolean emitAdTypeEquals(
-        String thenText, AtomicHit thenHit,
-        RuleRow row, DslOut out) {
-
-    String code = lastGroup(thenHit);
-    if (isBlank(code) && row != null && row.getMergedThenCodes()!=null && !row.getMergedThenCodes().isEmpty())
-        code = row.getMergedThenCodes().get(0);
-
-    if (isBlank(code)) return false;
-
-    out.when("there is at least one GoodsItem");
-    out.then("at least one GoodsItem.additionalDocuments.type.code equals \"" + code + "\"");
-    return true;
-}
-
-
-private boolean emitGiRequestedPrevList(
-        String ifText, String thenText,
-        AtomicHit ifHit, AtomicHit thenHit,
-        RuleRow row, DslOut out) {
-
-    String req = lastGroup(ifHit);                       // e.g., "44"
-    if (isBlank(req) && row != null) req = row.getIfCode(); // if available
-    java.util.List<String> allowed = groupsToList(thenHit);
-    if (allowed.isEmpty()) {
-        // some sheets put the list in mergedThenCodes
-        if (row != null && row.getMergedThenCodes() != null) allowed = row.getMergedThenCodes();
+    // Push to your real DSL writer using your existing API
+    void flushTo(DslWriter dsl) {
+        if (isEmpty()) return;
+        dsl.when(whens);          // if you have a bulk method
+        dsl.then(thens);          // or loop and call dsl.when(..) individually
     }
 
-    if (isBlank(req) || allowed.isEmpty()) return false;
-
-    String lhs = "Goods item exists";
-    out.when(lhs + " - with requested procedure code equals \"" + req + "\"");
-    out.when(lhs + " - with previous procedure code not in " + quoteCsv(allowed));
-    return true;
-}
-
-private String lastGroup(AtomicHit hit) {
-    if (hit == null || hit.groups() == null || hit.groups().isEmpty()) return null;
-    String g = hit.groups().get(hit.groups().size()-1);
-    return g == null ? null : g.replace("\"","").trim();
-}
-private java.util.List<String> groupsToList(AtomicHit hit) {
-    if (hit == null || hit.groups() == null || hit.groups().isEmpty()) return java.util.Collections.emptyList();
-    // If parser split into multiple groups:
-    if (hit.groups().size() > 1) {
-        java.util.List<String> xs = new java.util.ArrayList<>();
-        for (String g : hit.groups()) if (g != null && !g.isBlank()) xs.add(g.replace("\"","").trim());
-        return xs;
+    // Handy if you want a single string for logging/tests
+    String asBlock() {
+        StringBuilder sb = new StringBuilder("when\n");
+        for (String w : whens) sb.append("  ").append(w).append('\n');
+        sb.append("then\n");
+        for (String t : thens) sb.append("  ").append(t).append('\n');
+        return sb.toString();
     }
-    // Else split the single CSV group (still regex-free)
-    String csv = hit.groups().get(hit.groups().size()-1);
-    if (csv == null || csv.isBlank()) return java.util.Collections.emptyList();
-    java.util.List<String> xs = new java.util.ArrayList<>();
-    for (String p : csv.split(",")) {
-        String v = p.replace("\"","").trim();
-        if (!v.isBlank()) xs.add(v);
-    }
-    return xs;
 }
-private String quoteCsv(java.util.List<String> xs) { return "\"" + String.join("\",\"", xs) + "\""; }
-private boolean isBlank(String s){ return s == null || s.trim().isEmpty(); }
-
-private String lastGroup(AtomicHit hit) {
-    if (hit == null || hit.groups() == null || hit.groups().isEmpty()) return null;
-    String g = hit.groups().get(hit.groups().size()-1);
-    return g == null ? null : g.replace("\"","").trim();
-}
-private java.util.List<String> groupsToList(AtomicHit hit) {
-    if (hit == null || hit.groups() == null || hit.groups().isEmpty()) return java.util.Collections.emptyList();
-    // If parser split into multiple groups:
-    if (hit.groups().size() > 1) {
-        java.util.List<String> xs = new java.util.ArrayList<>();
-        for (String g : hit.groups()) if (g != null && !g.isBlank()) xs.add(g.replace("\"","").trim());
-        return xs;
-    }
-    // Else split the single CSV group (still regex-free)
-    String csv = hit.groups().get(hit.groups().size()-1);
-    if (csv == null || csv.isBlank()) return java.util.Collections.emptyList();
-    java.util.List<String> xs = new java.util.ArrayList<>();
-    for (String p : csv.split(",")) {
-        String v = p.replace("\"","").trim();
-        if (!v.isBlank()) xs.add(v);
-    }
-    return xs;
-}
-private String quoteCsv(java.util.List<String> xs) { return "\"" + String.join("\",\"", xs) + "\""; }
-private boolean isBlank(String s){ return s == null || s.trim().isEmpty(); }
