@@ -1,69 +1,30 @@
-if (containsAD(IF) && containsAdTypeList(THEN)) {
-    emitAdExemptionTypeList(IF, THEN, ifHit, thenHit, row, dslWriter);   // flip inside
-} else if (containsAdTypeEquals(THEN)) {
-    emitAdTypeEquals(THEN, thenHit, row, dslWriter);                      // no flip
-} else if (containsRequested(IF) && containsPreviousAllowed(THEN)) {
-    emitGiRequestedPrevList(IF, THEN, ifHit, thenHit, row, dslWriter);    // flip inside
-} else {
-    // your existing generic path, unchanged
-    emitGenericAnchoredViolation(dslWriter, row);  // whatever you already call today
+private static String lastGroup(AtomicHit hit) {
+    if (hit == null || hit.groups() == null || hit.groups().isEmpty()) return null;
+    String g = hit.groups().get(hit.groups().size() - 1);
+    return g == null ? null : g.replace("\"","").trim();
 }
-
-
-private void emitAdExemptionTypeList(
-        String ifText, String thenText,
-        AtomicHit ifHit, AtomicHit thenHit,
-        RuleRow row, DslWriter dslWriter) {
-
-    String exemption = lastGroup(ifHit);
-    java.util.List<String> codes = groupsToListOrFallback(thenHit, row);
-    if (exemption == null || exemption.isBlank() || codes.isEmpty()) return;
-
-    // WHEN anchor + IF predicate (kept positive)
-    String anchorPath = "GoodsItem.additionalDocuments"; // or computeAnchorPathFromIf(ifClauses) if you already do
-    dslWriter.whenGoodsItemExists(anchorPath);
-    dslWriter.andWithEquals(FieldKeys.AD_EXEMPTION_CODE, exemption);
-
-    // THEN constraint turned into violation (flip here)
-    boolean forbidden = thenText != null && thenText.toLowerCase()
-        .matches(".*(not one of|must is not one of|must not be one of).*");
-    if (forbidden) {
-        dslWriter.andWithIn(FieldKeys.AD_TYPE_CODE, codes);     // FORBIDDEN → IN
-    } else {
-        dslWriter.andWithNotIn(FieldKeys.AD_TYPE_CODE, codes);  // ALLOWED → NOT IN
+private static java.util.List<String> groupsToList(AtomicHit hit) {
+    if (hit == null || hit.groups() == null || hit.groups().isEmpty()) return java.util.Collections.emptyList();
+    if (hit.groups().size() > 1) {
+        java.util.List<String> xs = new java.util.ArrayList<>();
+        for (String g : hit.groups()) if (g != null && !g.isBlank()) xs.add(g.replace("\"","").trim());
+        return xs;
     }
-}
-
-private void emitAdTypeEquals(
-        String thenText, AtomicHit thenHit,
-        RuleRow row, DslWriter dslWriter) {
-
-    String code = lastGroup(thenHit);
-    if (code == null || code.isBlank()) {
-        var merged = row == null ? null : row.mergedThencodes();
-        if (merged != null && !merged.isEmpty()) code = merged.get(0);
+    String csv = hit.groups().get(0);
+    if (csv == null || csv.isBlank()) return java.util.Collections.emptyList();
+    java.util.List<String> xs = new java.util.ArrayList<>();
+    for (String p : csv.split(",")) {
+        String v = p.replace("\"","").trim();
+        if (!v.isBlank()) xs.add(v);
     }
-    if (code == null || code.isBlank()) return;
-
-    // Keep your current style for the simple equals rule:
-    dslWriter.whenThereIsAtLeastOneGoodsItem();
-    dslWriter.thenAdTypeEquals(code);  // whatever you currently call to write that THEN line
+    return xs;
 }
-
-
-private void emitGiRequestedPrevList(
-        String ifText, String thenText,
-        AtomicHit ifHit, AtomicHit thenHit,
-        RuleRow row, DslWriter dslWriter) {
-
-    String req = lastGroup(ifHit);
-    java.util.List<String> allowed = groupsToListOrFallback(thenHit, row);
-    if (req == null || req.isBlank() || allowed.isEmpty()) return;
-
-    String anchorPath = "GoodsItem"; // or your computeAnchorPathFromIf
-    dslWriter.whenGoodsItemExists(anchorPath);
-    dslWriter.andWithEquals(FieldKeys.RQ_PROC_CODE, req);
-
-    // allowed set → violation is NOT IN
-    dslWriter.andWithNotIn(FieldKeys.PREV_PROC_CODE, allowed);
+private static java.util.List<String> groupsToListOrFallback(AtomicHit hit, RuleRow row) {
+    var xs = groupsToList(hit);
+    if (!xs.isEmpty()) return xs;
+    var merged = row == null ? null : row.mergedThencodes();
+    if (merged == null) return java.util.Collections.emptyList();
+    java.util.List<String> out = new java.util.ArrayList<>();
+    for (String s : merged) if (s != null && !s.isBlank()) out.add(s.replace("\"","").trim());
+    return out;
 }
