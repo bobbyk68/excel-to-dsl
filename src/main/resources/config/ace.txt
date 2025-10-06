@@ -1,26 +1,69 @@
-// Minimal adapter so emitXxx(...) doesn't depend directly on DslWriter.
-final class LocalDslBuffer {
-    private final java.util.List<String> whens = new java.util.ArrayList<>();
-    private final java.util.List<String> thens = new java.util.ArrayList<>();
+if (containsAD(IF) && containsAdTypeList(THEN)) {
+    emitAdExemptionTypeList(IF, THEN, ifHit, thenHit, row, dslWriter);   // flip inside
+} else if (containsAdTypeEquals(THEN)) {
+    emitAdTypeEquals(THEN, thenHit, row, dslWriter);                      // no flip
+} else if (containsRequested(IF) && containsPreviousAllowed(THEN)) {
+    emitGiRequestedPrevList(IF, THEN, ifHit, thenHit, row, dslWriter);    // flip inside
+} else {
+    // your existing generic path, unchanged
+    emitGenericAnchoredViolation(dslWriter, row);  // whatever you already call today
+}
 
-    void when(String line) { if (line != null && !line.isBlank()) whens.add(line); }
-    void then(String line) { if (line != null && !line.isBlank()) thens.add(line); }
 
-    boolean isEmpty() { return whens.isEmpty() && thens.isEmpty(); }
+private void emitAdExemptionTypeList(
+        String ifText, String thenText,
+        AtomicHit ifHit, AtomicHit thenHit,
+        RuleRow row, DslWriter dslWriter) {
 
-    // Push to your real DSL writer using your existing API
-    void flushTo(DslWriter dsl) {
-        if (isEmpty()) return;
-        dsl.when(whens);          // if you have a bulk method
-        dsl.then(thens);          // or loop and call dsl.when(..) individually
+    String exemption = lastGroup(ifHit);
+    java.util.List<String> codes = groupsToListOrFallback(thenHit, row);
+    if (exemption == null || exemption.isBlank() || codes.isEmpty()) return;
+
+    // WHEN anchor + IF predicate (kept positive)
+    String anchorPath = "GoodsItem.additionalDocuments"; // or computeAnchorPathFromIf(ifClauses) if you already do
+    dslWriter.whenGoodsItemExists(anchorPath);
+    dslWriter.andWithEquals(FieldKeys.AD_EXEMPTION_CODE, exemption);
+
+    // THEN constraint turned into violation (flip here)
+    boolean forbidden = thenText != null && thenText.toLowerCase()
+        .matches(".*(not one of|must is not one of|must not be one of).*");
+    if (forbidden) {
+        dslWriter.andWithIn(FieldKeys.AD_TYPE_CODE, codes);     // FORBIDDEN → IN
+    } else {
+        dslWriter.andWithNotIn(FieldKeys.AD_TYPE_CODE, codes);  // ALLOWED → NOT IN
     }
+}
 
-    // Handy if you want a single string for logging/tests
-    String asBlock() {
-        StringBuilder sb = new StringBuilder("when\n");
-        for (String w : whens) sb.append("  ").append(w).append('\n');
-        sb.append("then\n");
-        for (String t : thens) sb.append("  ").append(t).append('\n');
-        return sb.toString();
+private void emitAdTypeEquals(
+        String thenText, AtomicHit thenHit,
+        RuleRow row, DslWriter dslWriter) {
+
+    String code = lastGroup(thenHit);
+    if (code == null || code.isBlank()) {
+        var merged = row == null ? null : row.mergedThencodes();
+        if (merged != null && !merged.isEmpty()) code = merged.get(0);
     }
+    if (code == null || code.isBlank()) return;
+
+    // Keep your current style for the simple equals rule:
+    dslWriter.whenThereIsAtLeastOneGoodsItem();
+    dslWriter.thenAdTypeEquals(code);  // whatever you currently call to write that THEN line
+}
+
+
+private void emitGiRequestedPrevList(
+        String ifText, String thenText,
+        AtomicHit ifHit, AtomicHit thenHit,
+        RuleRow row, DslWriter dslWriter) {
+
+    String req = lastGroup(ifHit);
+    java.util.List<String> allowed = groupsToListOrFallback(thenHit, row);
+    if (req == null || req.isBlank() || allowed.isEmpty()) return;
+
+    String anchorPath = "GoodsItem"; // or your computeAnchorPathFromIf
+    dslWriter.whenGoodsItemExists(anchorPath);
+    dslWriter.andWithEquals(FieldKeys.RQ_PROC_CODE, req);
+
+    // allowed set → violation is NOT IN
+    dslWriter.andWithNotIn(FieldKeys.PREV_PROC_CODE, allowed);
 }
