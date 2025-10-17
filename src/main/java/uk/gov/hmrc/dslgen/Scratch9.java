@@ -1,25 +1,43 @@
-public record RuleMeta(String ruleName,
-                       String errorCode,
-                       java.util.List<String> declarationTypes,
-                       java.util.List<String> procedureCategories) {
-    public static RuleMeta of(RuleRow r) {
-        return new RuleMeta(r.id(), r.errorCode(), r.declarationType(), r.procedureCategory());
+private static String normaliseValue(Operator op, String raw) {
+    // Keep value for NOT_EXISTS – we need to show the required code(s) in the bullet.
+    if (op == Operator.EXISTS) {
+        // Pure existence checks (no specific code) can omit the value.
+        return "";
     }
+    if (raw == null || raw.isBlank()) {
+        return "\"\"";
+    }
+    String s = raw.trim();
+
+    // Preserve quoted lists or quoted singletons as-is
+    if (s.contains(",") && (s.startsWith("\"") || s.startsWith("'"))) {
+        return s;
+    }
+
+    // If list without quotes -> quote each token
+    if (s.contains(",")) {
+        String[] parts = s.split(",");
+        for (int i = 0; i < parts.length; i++) parts[i] = quote(parts[i].trim());
+        return String.join(",", parts);
+    }
+
+    // Single value -> ensure quoted
+    return quote(s);
+}
+
+private static String quote(String v) {
+    if (v == null || v.isBlank()) return "\"\"";
+    String s = v.trim();
+    boolean alreadyQuoted = (s.startsWith("\"") && s.endsWith("\"")) ||
+            (s.startsWith("'")  && s.endsWith("'"));
+    return alreadyQuoted ? s : "\"" + s + "\"";
 }
 
 
-// in DslrFileWriter (or your SimpleDslFileWriter)
-public void beginRule(RuleMeta m) {
-    buf.append("rule \"").append(m.ruleName()).append("\"\n");
-    buf.append("@ErrorCode(\"").append(m.errorCode()).append("\")\n");
-    buf.append("@declarationType(\"").append(String.join(",", m.declarationTypes())).append("\")\n");
-    buf.append("@procedureCategory(\"").append(String.join(",", m.procedureCategories())).append("\")\n");
+switch (operatorToken.toLowerCase()) {
+        case "equals"   -> Operator.EQUALS;
+    case "in"       -> Operator.IN;
+    case "not in"   -> Operator.NOT_IN;
+    case "not exists" -> Operator.NOT_EXISTS;  // <-- required
+default         -> Operator.EQUALS;
 }
-public void endRule() { buf.append("end\n"); }
-
-
-RuleMeta meta = RuleMeta.of(row);
-DslrFileWriter dsl = new DslrFileWriter();
-dsl.beginRule(meta);                    // header here (once)
-registry.dispatch(ctx, dsl);            // emitters only add WHEN/THEN lines
-dsl.endRule();
