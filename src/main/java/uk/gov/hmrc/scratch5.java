@@ -1,234 +1,178 @@
-package uk.gov.hmrc.dslgen.emit;
-
-import uk.gov.hmrc.dslgen.pattern.PatternIntrospector;
-
-import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-/**
- * AtomicMatcher that works with your existing Runner:
- *   List<AtomicMatcher.CompiledAtomic> compiled = ...;
- *   AtomicMatcher m = new AtomicMatcher(compiled);
- *
- * JSON/DSL contract: pattern captures only the VALUE (group 1); DSL is a phrase template.
- * We derive PATH + bullet OP from the Excel literal; for the 2nd IF we detect absence or "all ... must be one of".
- */
-public final class AtomicMatcher {
-
-    // ======================================================================
-    // Legacy-expected compiled type (kept exactly for your Runner)
-    // ======================================================================
-    public static final class CompiledAtomic {
-        private final String id;
-        private final Pattern regex;
-        private final String pattern; // original regex source (for logging)
-        private final String dsl;     // phrase template (kept for reference)
-        private final PatternIntrospector.Meta meta; // parsed from DSL (debug-only)
-
-        private CompiledAtomic(String id, Pattern regex, String pattern, String dsl, PatternIntrospector.Meta meta) {
-            this.id = id;
-            this.regex = regex;
-            this.pattern = pattern;
-            this.dsl = dsl;
-            this.meta = meta;
-        }
-
-        /** Factory used by your Runner: CompiledAtomic.compile(id, regexSource, pattern, dsl). */
-        public static CompiledAtomic compile(String id, String regexSource, String pattern, String dsl) {
-            Pattern rx = Pattern.compile(regexSource, Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-            PatternIntrospector.Meta meta = PatternIntrospector.parse(dsl);
-            if (meta == null) {
-                // Safe defaults (not used for structure now—only for debugging)
-                meta = new PatternIntrospector.Meta(
-                        PatternIntrospector.AnchorScope.GI,
-                        "GoodsItem",
-                        PatternIntrospector.FieldKey.UNKNOWN,
-                        PatternIntrospector.Operator.EQ,
-                        PatternIntrospector.Quantifier.EXISTS,
-                        false,
-                        PatternIntrospector.PatternKind.UNKNOWN
-                );
-            }
-            return new CompiledAtomic(id, rx, pattern, dsl, meta);
-        }
-
-        public String id() { return id; }
-        public Pattern regex() { return regex; }
-        public String pattern() { return pattern; }
-        public String dsl() { return dsl; }
-        public PatternIntrospector.Meta meta() { return meta; }
-    }
-
-    // ======================================================================
-    // Matcher state & ctor
-    // ======================================================================
-    private final List<CompiledAtomic> compiled;
-
-    public AtomicMatcher(List<CompiledAtomic> compiled) {
-        this.compiled = Objects.requireNonNull(compiled);
-    }
-
-    /** First IF (left column). */
-    public AtomicHit matchIf(String literal)  { return match(literal, /*isSecondIf*/ false); }
-
-    /** Second IF (your sheet’s “thenCondition” column). */
-    public AtomicHit matchThen(String literal){ return match(literal, /*isSecondIf*/ true);  }
-
-    // ======================================================================
-    // Core matching logic
-    // ======================================================================
-    private AtomicHit match(String literal, boolean isSecondIf) {
-        if (literal == null || literal.isBlank())
-            throw new IllegalArgumentException("Empty clause");
-        final String norm = normalise(literal);
-
-        for (CompiledAtomic ca : compiled) {
-            Matcher m = ca.regex().matcher(norm);
-
-            // Support both whole-line and tail patterns (e.g., "must equals (.+)")
-            if (!(m.matches() || m.find())) continue;
-
-            // Your JSON pattern captures only VALUE as group(1)
-            if (m.groupCount() < 1 || m.group(1) == null || m.group(1).trim().isEmpty())
-                throw new IllegalStateException("Pattern matched but no value captured: " + ca.pattern());
-
-            final String value = m.group(1).trim();
-
-            // Derive PATH + bullet operator from the literal (not from DSL/meta)
-            final String path          = deriveCanonicalPathFromLiteral(norm); // e.g., GoodsItem.additionalInformation.code
-            final String bulletOpToken = parseBulletOperatorFromLiteral(norm); // "equals" | "in" | "not in"
-
-            // Decide final operator for the hit (2nd IF only may flip)
-            final String operatorToken = decideRightOperatorToken(norm, bulletOpToken, isSecondIf);
-
-            // Map canonical path → tokens and build the hit (KEEP value)
-            final PathMapper.Tokens tk = PathMapper.tokensFor(path);
-
-            return new AtomicHit()
-                    .setAnchorToken(tk.anchorTok)
-                    .setFieldToken(tk.fieldTok)
-                    .setOperatorToken(operatorToken)
-                    .setRawValue(value);
-        }
-
-        throw new IllegalStateException("No JSON pattern matched: " + literal);
-    }
-
-    /**
-     * For the SECOND IF ONLY:
-     *  - "all ... must be/is one of S" → NOT_IN (existence stays "Matching ... exists")
-     *  - "must equal/equals", "there is no", "no matching" → NOT_EXISTS (existence flips)
-     * Otherwise keep the bullet operator ("equals"/"in"/"not in").
-     */
-    private static String decideRightOperatorToken(String norm, String bulletOpToken, boolean isSecondIf) {
-        if (!isSecondIf) return bulletOpToken;
-        final String t = norm.toLowerCase(Locale.ROOT);
-
-        // RP–PP style: "all ... must be/is one of S" ⇒ violation is "exists value outside S" ⇒ NOT_IN
-        final boolean isAll     = t.startsWith("all ") || t.contains(" all ");
-        final boolean saysOneOf = t.contains("is one of") || t.contains(" in ");
-        final boolean hasMust   = t.contains(" must ");
-        if (isAll && hasMust && saysOneOf) return "not in";
-
-        // Required-but-missing: "must equal/equals", "there is no", "no matching"
-        final boolean absence =
-                t.contains("there is no ") ||
-                        t.contains(" no matching ") ||
-                        t.contains(" must equal")  ||
-                        t.contains(" must equals") ||
-                        t.contains(" must be ")    ||
-                        t.contains(" must in ")    ||
-                        t.contains(" must is one of");
-
-        return absence ? "not exists" : bulletOpToken;
-    }
-
-    /** Canonical path from literal. Never guess blindly. */
-    private static String deriveCanonicalPathFromLiteral(String norm) {
-        // 1) dot path
-        Matcher p = Pattern.compile("(GoodsItem(?:\\.[A-Za-z]+)+)", Pattern.CASE_INSENSITIVE).matcher(norm);
-        if (p.find()) {
-            String full = p.group(1).toLowerCase(Locale.ROOT);
-            if (full.endsWith(".specialprocedures.code") || full.endsWith(".specialprocedure.code"))
-                return "GoodsItem.specialProcedures.code";
-            if (full.endsWith(".additionalinformation.code"))
-                return "GoodsItem.additionalInformation.code";
-            if (full.endsWith(".additionaldocuments.type.code"))
-                return "GoodsItem.additionalDocuments.type.code";
-            if (full.endsWith(".additionaldocuments.exemption.code"))
-                return "GoodsItem.additionalDocuments.exemption.code";
-            if (full.endsWith(".requestedprocedurecode"))
-                return "GoodsItem.requestedProcedureCode";
-            if (full.endsWith(".previousprocedurecode"))
-                return "GoodsItem.previousProcedureCode";
-        }
-        // 2) keyword cues
-        String t = norm.toLowerCase(Locale.ROOT);
-        if (t.contains("special procedure"))              return "GoodsItem.specialProcedures.code";
-        if (t.contains("additional information"))         return "GoodsItem.additionalInformation.code";
-        if (t.contains("additional document") && t.contains("type"))
-            return "GoodsItem.additionalDocuments.type.code";
-        if (t.contains("additional document") && t.contains("exemption"))
-            return "GoodsItem.additionalDocuments.exemption.code";
-        if (t.contains("requested procedure code"))       return "GoodsItem.requestedProcedureCode";
-        if (t.contains("previous procedure code"))        return "GoodsItem.previousProcedureCode";
-
-        throw new IllegalStateException("Cannot resolve path from literal: " + norm);
-    }
-
-    /** Bullet operator from literal. */
-    private static String parseBulletOperatorFromLiteral(String norm) {
-        String t = norm.toLowerCase(Locale.ROOT);
-        if (t.contains("is not one of") || t.contains(" not in ")) return "not in";
-        if (t.contains("is one of")     || t.contains(" in "))     return "in";
-        return "equals";
-    }
-
-    private static String normalise(String s){
-        return s.replace('\u2013','-').replace('\u2014','-')
-                .replace('“','"').replace('”','"').replace('’','\'').trim();
-    }
-
-    // ======================================================================
-    // Concrete hit type (implements your existing adapter interface)
-    // ======================================================================
-    public static final class AtomicHit implements AtomicHitAdapter.AtomicHit {
-        private String aTok, fTok, oTok, raw;
-        @Override public String getAnchorToken(){ return aTok == null ? "" : aTok; }
-        @Override public String getFieldToken(){  return fTok == null ? "" : fTok; }
-        @Override public String getOperatorToken(){ return oTok == null ? "" : oTok; }
-        @Override public String getRawValue(){    return raw == null ? "" : raw; }
-        public AtomicHit setAnchorToken(String v){ this.aTok = v; return this; }
-        public AtomicHit setFieldToken(String v){  this.fTok = v; return this; }
-        public AtomicHit setOperatorToken(String v){ this.oTok = v; return this; }
-        public AtomicHit setRawValue(String v){    this.raw = v;  return this; }
-    }
-
-    // ======================================================================
-    // Embedded PathMapper so this stays a single file
-    // ======================================================================
-    static final class PathMapper {
-        static final class Tokens {
-            final String anchorTok, fieldTok;
-            Tokens(String a, String f){ this.anchorTok=a; this.fieldTok=f; }
-        }
-        static Tokens tokensFor(String pathRaw){
-            if (pathRaw == null) return new Tokens("GI","UNKNOWN");
-            String p = pathRaw.trim().toLowerCase(Locale.ROOT);
-
-            // SP / AI / AD families
-            if (p.equals("goodsitem.specialprocedures.code"))             return new Tokens("SP","SP_CODE");
-            if (p.equals("goodsitem.additionalinformation.code"))         return new Tokens("AI","AI_CODE");
-            if (p.equals("goodsitem.additionaldocuments.type.code"))      return new Tokens("AD","AD_TYPE_CODE");
-            if (p.equals("goodsitem.additionaldocuments.exemption.code")) return new Tokens("AD","AD_EXEMPT_CODE");
-
-            // RP / PP
-            if (p.equals("goodsitem.requestedprocedurecode"))             return new Tokens("GI","REQ_PROC");
-            if (p.equals("goodsitem.previousprocedurecode"))              return new Tokens("GI","PREV_PROC");
-
-            // Last resort (kept permissive to avoid hard failures mid-POC)
-            return new Tokens("GI", pathRaw);
-        }
-    }
+//----------------------------------------------
+// ADDED: expose compiled regex Pattern
+//----------------------------------------------
+public java.util.regex.Pattern rx() {
+    return this.regex;   // your field from the screenshot
 }
+
+//----------------------------------------------
+// ADDED: expose parsed Meta (anchor, fieldKey, operator, etc.)
+//----------------------------------------------
+public PatternIntrospector.Meta meta() {
+    return this.meta;    // same as in your constructor
+}
+
+//----------------------------------------------
+// ADDED: expose id (you already store it)
+//----------------------------------------------
+public String id() {
+    return this.id;
+}
+
+// ===== Runner.java =====
+
+// ----------------------------------------------
+// 1) After you have `compiled` and your `rules` list, build an index by atomic id
+// ----------------------------------------------
+java.util.Map<String, CompiledAtomic> compiledById = new java.util.HashMap<>();
+for (CompiledAtomic ca : compiled) {
+        compiledById.put(ca.id(), ca);
+        }
+
+// ----------------------------------------------
+// 2) Phase 1: COLLECT
+//    - Build (comboKey, firstValue) -> Impact (ruleIds + errorCodes)
+//    - Stash a light buffer per rule for Phase 2 emitting
+// ----------------------------------------------
+record Impact(java.util.Set<String> rules, java.util.Set<String> errors) {}
+java.util.Map<String, java.util.Map<String, Impact>> impactByComboThenV1 = new java.util.HashMap<>();
+
+record Buf(String combo, String ruleId, String err, String v1, String v2, String rightClauseText) {}
+java.util.List<Buf> buffer = new java.util.ArrayList<>();
+
+for (RuleRow r : rules) {
+CompiledAtomic left  = compiledById.get(r.leftAtomicId());
+CompiledAtomic right = compiledById.get(r.rightAtomicId());
+
+// --- extract first and second values by applying the compiled regex to the literal lines
+String v1 = firstGroup(left != null ? left.rx() : null,  r.leftLiteral());
+String v2 = firstGroup(right != null ? right.rx() : null, r.rightLiteral());
+
+// --- derive combo key (prefer your existing, else from Meta)
+String combo = (hasText(r.comboKey()) ? r.comboKey() : deriveCombo(left != null ? left.meta() : null,
+        right != null ? right.meta() : null));
+
+// --- register into (combo, v1) bucket
+    impactByComboThenV1
+            .computeIfAbsent(combo, k -> new java.util.HashMap<>())
+        .computeIfAbsent(v1,    k -> new Impact(new java.util.LinkedHashSet<>(), new java.util.LinkedHashSet<>()))
+        .rules.add(r.ruleId());
+        impactByComboThenV1.get(combo).get(v1).errors.add(r.errorCode());
+
+        // --- stash for Phase 2
+        buffer.add(new Buf(combo, r.ruleId(), r.errorCode(), v1, v2, r.rightClauseText()));
+        }
+
+// ----------------------------------------------
+// 3) Phase 2: EMIT (after ALL rules processed)
+//    - For each buffered rule, pipe-join only SAME-COMBO co-triggers
+//    - Write two rows: trigger + NONE row
+// ----------------------------------------------
+java.nio.file.Path csv = java.nio.file.Path.of("output/rules.csv");
+java.nio.file.Files.createDirectories(csv.getParent());
+boolean append = false;
+java.nio.file.OpenOption[] opts = append
+        ? new java.nio.file.OpenOption[]{ java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND }
+        : new java.nio.file.OpenOption[]{ java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING, java.nio.file.StandardOpenOption.WRITE };
+
+for (Buf b : buffer) {
+Impact imp = impactByComboThenV1
+        .getOrDefault(b.combo(), java.util.Map.of())
+        .getOrDefault(b.v1(),    new Impact(java.util.Set.of(), java.util.Set.of()));
+
+String rulesJoined  = joinPipe(imp.rules.isEmpty()  ? java.util.List.of(b.ruleId())   : imp.rules);
+String errorsJoined = joinPipe(imp.errors.isEmpty() ? java.util.List.of(b.err())      : imp.errors);
+
+// trigger row
+writeCsv(csv, opts, rulesJoined, errorsJoined, b.v1(), b.v2());
+
+// NONE row (break condition #2 only)
+String neg = pickNegativeSecondValue(b.rightClauseText(), b.v2());
+writeCsv(csv, opts, "NONE", errorsJoined, b.v1(), neg);
+        }
+
+// ----------------------------------------------
+// helpers (add at bottom of Runner)
+// ----------------------------------------------
+private static boolean hasText(String s) { return s != null && !s.isBlank(); }
+
+private static String firstGroup(java.util.regex.Pattern rx, String literal) {
+    if (rx == null || !hasText(literal)) return "";
+    var m = rx.matcher(literal);
+    return (m.find() && m.groupCount() >= 1) ? nz(m.group(1)) : "";
+}
+
+private static String deriveCombo(PatternIntrospector.Meta left, PatternIntrospector.Meta right) {
+    return abbrev(left) + "-" + abbrev(right);
+}
+
+private static String abbrev(PatternIntrospector.Meta m) {
+    if (m == null) return "NA";
+    String key = String.valueOf(m.fieldKey()).toUpperCase();   // e.g., SP_CODE, RP_CODE, AD_TYPE_CODE …
+    if (key.contains("SP")) return "SP";
+    if (key.contains("RP")) return "RP";
+    if (key.contains("PP")) return "PP";
+    if (key.contains("AD")) return "AD";
+    if (key.contains("AI")) return "AI";
+    if (key.contains("GI")) return "GI";
+    return "NA";
+}
+
+private static String pickNegativeSecondValue(String rightClause, String good) {
+    // 1) If the right clause lists allowed values -> choose something outside
+    var set = new java.util.HashSet<String>();
+    var m = java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(nz(rightClause));
+    while (m.find()) set.add(m.group(1));
+    if (!set.isEmpty()) {
+        for (String c : new String[]{"ZZZ","99X","__NOT_IN_SET__"})
+            if (!set.contains(c)) return c;
+    }
+    // 2) Numeric nudge outside boundary
+    var num = java.util.regex.Pattern
+            .compile("(>=|<=|>|<|equals|==)\\s*(\\d+(?:\\.\\d+)?)", java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(nz(rightClause));
+    if (num.find()) {
+        String op = num.group(1), lit = num.group(2);
+        try {
+            double v = Double.parseDouble(lit);
+            if (op.equals(">") || op.equals(">="))  return String.valueOf(v - 1);
+            if (op.equals("<") || op.equals("<="))  return String.valueOf(v + 1);
+            return String.valueOf(v + 1); // equals / ==
+        } catch (NumberFormatException ignore) {}
+    }
+    // 3) Default mutate so 'equals' / 'contains' won’t pass
+    return hasText(good) ? good + "_X" : "__NEG__";
+}
+
+private static String joinPipe(java.util.Collection<String> xs) {
+    return String.join("|", xs);
+}
+
+private static String nz(String s) { return s == null ? "" : s; }
+
+private static void writeCsv(java.nio.file.Path file,
+                             java.nio.file.OpenOption[] opts,
+                             String c1, String c2, String c3, String c4) {
+    String row = csv(c1) + "," + csv(c2) + "," + csv(c3) + "," + csv(c4) + "\n";
+    try { java.nio.file.Files.writeString(file, row, java.nio.charset.StandardCharsets.UTF_8, opts); }
+    catch (java.io.IOException e) { throw new RuntimeException("CSV write failed: " + file, e); }
+}
+
+private static String csv(String s) {
+    if (s == null) s = "";
+    boolean q = s.contains(",") || s.contains("\"") || s.contains("\n");
+    String t = s.replace("\"","\"\"");
+    return q ? "\"" + t + "\"" : t;
+}
+
+
+// 1) load JSON → Bundle bundle
+// 2) compile atomics
+List<CompiledAtomic> compiled = bundle.atomic().stream()
+        .map(a -> CompiledAtomic.compile(a.id(), "^" + a.pattern() + "$", a.pattern(), a.dsl()))
+        .collect(java.util.stream.Collectors.toList());
+
+// 3) build rule rows (your current flow)
+List<RuleRow> rules = /* your existing list */;
+
+// >>> ADD the block from section (B) here (index compiledById, collect, emit) <<<
