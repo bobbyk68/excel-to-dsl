@@ -208,3 +208,91 @@ firstWrite = false;
 String negV2 = pickNegV2WithSpec(b.rightClause(), b.v2N());
 writeCsv(out, APPEND, "NONE", errorsJoined, b.v1N(), negV2);
         }
+
+
+
+
+// Parse right clause to: negation flag + the set of tokens.
+// Works for: equals / in / one of / NOT variants, with unquoted CSV/pipe/space.
+// Falls back to the provided fallbackSingle if parsing fails.
+static final class AllowedSpec {
+    final boolean isNegated;
+    final java.util.LinkedHashSet<String> items;
+    AllowedSpec(boolean n, java.util.Collection<String> i) {
+        isNegated = n; items = new java.util.LinkedHashSet<>(i);
+    }
+}
+private static String normVal(String s){ return s==null? "" : s.trim().toUpperCase(); }
+
+private static AllowedSpec parseAllowedSpec(String clauseText, String fallbackSingle) {
+    String t = clauseText == null ? "" : clauseText.trim();
+    boolean neg = java.util.regex.Pattern
+            .compile("\\b(is\\s+not\\s+one\\s+of|not\\s+one\\s+of|not\\s+in|!=|<>)\\b",
+                    java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(t).find();
+
+    java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+
+    java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("(?:is\\s+not\\s+one\\s+of|not\\s+one\\s+of|not\\s+in|one\\s+of|in|equals|==|!=|<>)\\s+(.+)$",
+                    java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(t);
+    if (m.find()) {
+        String rhs = m.group(1).trim().replaceAll("^\\[|\\]$", "");
+        for (String tok : rhs.split("[,|\\s]+")) {
+            tok = tok.trim();
+            if (!tok.isEmpty()) out.add(normVal(tok.replaceAll("^\"|\"$", "")));
+        }
+    }
+
+    if (out.isEmpty()) {
+        java.util.regex.Matcher single = java.util.regex.Pattern
+                .compile("(?:equals|==|!=|<>)\\s*([A-Za-z0-9._-]+)", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(t);
+        if (single.find()) out.add(normVal(single.group(1)));
+        else if (fallbackSingle != null && !fallbackSingle.isBlank()) out.add(normVal(fallbackSingle));
+    }
+    return new AllowedSpec(neg, out);
+}
+
+private static boolean accepts(AllowedSpec spec, String value) {
+    String v = normVal(value);
+    return spec.isNegated ? !spec.items.contains(v) : spec.items.contains(v);
+}
+
+// 🔴 The key fix: always return a v2 that FLIPS the truth value.
+private static String pickNegV2WithSpec(String rightClause, String goodV2) {
+    AllowedSpec spec = parseAllowedSpec(rightClause, goodV2);
+
+    // If the "good" value already (incorrectly) fails, keep it but mark — very rare.
+    if (!accepts(spec, goodV2)) return goodV2;
+
+    // POSITIVE predicates (IN / ONE OF / EQUALS): choose a token NOT in the allowed set.
+    if (!spec.isNegated) {
+        // deterministic probes that are unlikely to appear in real sets
+        for (String cand : new String[]{"ZZZ","__NEG__","NOPE","99X"}) {
+            if (!spec.items.contains(normVal(cand))) return cand;
+        }
+        // fallback: mutate the good value until it’s outside the set
+        String base = normVal(goodV2);
+        for (int i = 1; i <= 5; i++) {
+            String cand = base + "_X" + i;
+            if (!spec.items.contains(cand)) return cand;
+        }
+        return base + "_NEG"; // last resort
+    }
+
+    // NEGATIVE predicates (NOT IN / NOT ONE OF / !=): choose a token INSIDE the forbidden set.
+    if (!spec.items.isEmpty()) return spec.items.iterator().next();
+
+    // No items parsed? fabricate a token that will be considered "inside"
+    return normVal(goodV2); // with a negated empty set, everything is accepted; this is the best we can do
+}
+
+
+// Trigger row
+writeCsv(out, opts, rulesJoined, errorsJoined, b.v1N(), b.v2N());
+
+// NONE row — keep v1 the same, but pick a v2 that DOES NOT satisfy the right clause
+String negV2 = pickNegV2WithSpec(b.rightClause(), b.v2N());
+writeCsv(out, appendOpts, "NONE", errorsJoined, b.v1N(), negV2);
