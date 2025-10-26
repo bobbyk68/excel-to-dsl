@@ -1,127 +1,201 @@
-// Add these helpers inside DslrGen (e.g., near runExample)
-private static DslrGen.ParsedClause parseClause(String raw) {
-    String s = raw.trim();
-    // operator phrases (longer first so we match the longest)
-    String[] OPS = {
-            "does not exist", "not exists", "must not equal", "not equals", "is not",
-            "must not be one of", "not in",
-            "is one of", "must be one of", "equal to", "equals", "is",
-            "in", "exists", "is present", "present"
-    };
+// If this lives inside DslrGen, remove the package line.
+// Otherwise keep/adjust it to match your project.
+package uk.gov.hmrc.dslgen.format;
 
-    int bestPos = -1, bestLen = -1;
-    String bestOp = null;
-    String lower = s.toLowerCase(java.util.Locale.ROOT);
+import uk.gov.hmrc.dslgen.ir.RuleIR;
+import uk.gov.hmrc.dslgen.router.Signature;
 
-    for (String op : OPS) {
-        String needle = " " + op + " ";
-        int pos = lower.indexOf(needle);
-        // also allow terminal ops like "... exists" / "... does not exist"
-        if (pos < 0) {
-            if (lower.endsWith(" " + op)) pos = lower.lastIndexOf(" " + op);
-        }
-        if (pos >= 0 && op.length() > bestLen) {
-            bestPos = pos;
-            bestLen = op.length();
-            bestOp = op;
-        }
-    }
-    if (bestOp == null) throw new IllegalArgumentException("Unsupported operator in: " + raw);
+import java.util.*;
+import java.util.stream.Collectors;
 
-    String path = s.substring(0, bestPos).trim();
-    String tail = s.substring(bestPos + 1).trim(); // drop leading space
-    String opToken = bestOp;
-    String valuesPart = tail.substring(bestOp.length()).trim(); // may be empty
+/**
+ * DSLR Formatter — applies wording rules only (logic/emitter unchanged).
+ *
+ * Rules:
+ * 1) Parent macro (by anchor):
+ *    GOODS_ITEM                      -> "Goods item exists"
+ *    GI_ADDITIONAL_DOCUMENTS         -> "Goods item with additional document exists"
+ *    (others fallback to older stems)
+ *
+ * 2) Dash-line prefix:
+ *    - Value ops (EQ/NEX/IN/NIN):     prefix = "with"
+ *    - Existential:
+ *         EX  (exists)                -> "with <label> exists"
+ *         NEX (not exists, no values) -> "without <label> exists"
+ *
+ * 3) Operator words (canonical):
+ *    EQ  -> "equals";  NEX -> "not equals";  IN -> "in";  NIN -> "not in";  EX -> "exists"
+ *    (Emitter already negates THEN; we just print what we get.)
+ *
+ * 4) Values:
+ *    Single -> "\"VAL\""
+ *    Lists  -> "\"A\",\"B\",\"C\""   (NO square brackets)
+ *    Existential -> no values printed.
+ *
+ * 5) Label prettifier:
+ *    - Drop root segment before first '.'
+ *    - Split on '.'; de-camel each token; lowercase words
+ *    - Preserve acronyms (AEO, EORI, VAT, UCR) in uppercase
+ *    - Join with spaces
+ */
+public final class DslrFormatter {
 
-    java.util.List<String> values = java.util.List.of();
-    if (!valuesPart.isEmpty()) {
-        if (valuesPart.startsWith("[")) {
-            values = parseList(valuesPart);
-        } else if (valuesPart.startsWith("\"")) {
-            values = java.util.List.of(unquote(valuesPart));
-        } else {
-            values = java.util.List.of(valuesPart);
-        }
-    }
-    return new DslrGen.ParsedClause(path, opToken, values);
-}
-
-private static java.util.List<String> parseList(String part) {
-    String inner = part.trim();
-    if (!inner.startsWith("[") || !inner.endsWith("]"))
-        throw new IllegalArgumentException("Bad list syntax: " + part);
-    inner = inner.substring(1, inner.length() - 1).trim();
-    if (inner.isEmpty()) return java.util.List.of();
-
-    java.util.ArrayList<String> out = new java.util.ArrayList<>();
-    int i = 0;
-    while (i < inner.length()) {
-        while (i < inner.length() && (inner.charAt(i) == ',' || Character.isWhitespace(inner.charAt(i)))) i++;
-        if (i >= inner.length()) break;
-        if (inner.charAt(i) == '"') {
-            int j = ++i;
-            StringBuilder sb = new StringBuilder();
-            while (j < inner.length() && inner.charAt(j) != '"') sb.append(inner.charAt(j++));
-            if (j >= inner.length()) throw new IllegalArgumentException("Unclosed quote in: " + part);
-            out.add(sb.toString());
-            i = j + 1;
-        } else {
-            int j = i;
-            while (j < inner.length() && inner.charAt(j) != ',') j++;
-            out.add(inner.substring(i, j).trim());
-            i = j;
-        }
-    }
-    return out;
-}
-
-private static String unquote(String s) {
-    s = s.trim();
-    return (s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2) ? s.substring(1, s.length() - 1) : s;
-}
-
-private static String stemAfterRoot(String dottedPath) {
-    if (dottedPath == null) return "";
-    int dot = dottedPath.indexOf('.');
-    return (dot > 0 && dot + 1 < dottedPath.length()) ? dottedPath.substring(dot + 1) : dottedPath;
-}
-
-// Replace your existing runExample() with this one:
-public static void runExample() {
-    // 1) Raw IF/THEN strings (as they’d come from the sheet)
-    String ifText   = "GoodsItem.requestedProcedure.code equals \"VAL1\"";
-    String thenText = "GoodsItem.previousProcedure.code is one of [\"VAL2\",\"VAL3\"]";
-    java.util.List<String> errorCodes = java.util.List.of("ERRCODE_R1");
-
-    // 2) Parse into ParsedClause
-    var ifClauseParsed   = parseClause(ifText);
-    var thenClauseParsed = parseClause(thenText);
-
-    // 3) Build Signature (classification only)
-    var sig = new DslrGen.SignatureBuilder().build("R1", ifClauseParsed, thenClauseParsed);
-
-    // 4) Route (tiny gate)
-    var rr  = new DslrGen.Router().route(sig);
-    if (!rr.ok()) {
-        System.out.println("// fail-fast: " + rr.reason());
-        return;
-    }
-
-    // 5) Build EmitContext (use a readable stem for the path the user sees)
-    var emitCtx = new DslrGen.GenericEmitter.EmitContext(
-            new DslrGen.GenericEmitter.Clause(
-                    stemAfterRoot(ifClauseParsed.path()),  // e.g., "requestedProcedure.code"
-                    sig.ifKind.op, sig.ifKind.card, ifClauseParsed.values()
-            ),
-            new DslrGen.GenericEmitter.Clause(
-                    stemAfterRoot(thenClauseParsed.path()), // e.g., "previousProcedure.code"
-                    sig.thenKind.op, sig.thenKind.card, thenClauseParsed.values()
-            ),
-            java.util.List.of(DslrGen.RuleIR.ThenEffect.errorCodes(errorCodes))
+    // ── Parent macro overrides (add more as you standardise wording) ────────────
+    private static final Map<Signature.Anchor, String> ANCHOR_MACROS = Map.of(
+            Signature.Anchor.GOODS_ITEM, "Goods item exists",
+            Signature.Anchor.GI_ADDITIONAL_DOCUMENTS, "Goods item with additional document exists"
     );
 
-    // 6) Emit IR (THEN is negated here) and format DSLR (two shapes only)
-    var ir   = new DslrGen.GenericEmitter().emit(sig, emitCtx);
-    var dslr = new DslrGen.DslrFormatter().toDslr(ir);
-    System.out.println(dslr);
+    // Fallback stems used if not in ANCHOR_MACROS (keeps older wording for now)
+    private static String fallbackStem(Signature.Anchor a) {
+        return switch (a) {
+            case GOODS_ITEM -> "There is a Goods Item";
+            case GI_SPECIAL_PROCEDURES -> "Special procedure exists";
+            case GI_ADDITIONAL_INFORMATION -> "Additional information exists";
+            case GI_ADDITIONAL_DOCUMENTS -> "Additional document exists";
+            case GI_DECLARED_DUTY_TAX_FEES -> "Declared duty/tax/fee exists";
+            case GI_ORIGIN -> "Origin exists";
+            case DECL_AUTH_HOLDER -> "There is an Authorization Holder";
+            case CONSIGNMENT_VALUATION_ADJUSTMENTS -> "There exists a Valuation Adjustment";
+            default -> "Unknown anchor exists";
+        };
+    }
+
+    // Acronyms to preserve in uppercase when prettifying labels
+    private static final Set<String> ACRONYMS = Set.of("AEO", "EORI", "VAT", "UCR");
+
+    public String toDslr(RuleIR ir) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("when\n");
+
+        if (ir.sections.size() == 1) {
+            var sec = ir.sections.get(0);
+            sb.append("  ").append(parentStem(sec.anchor)).append("\n");
+            for (var cl : sortClauses(sec.clauses)) {
+                sb.append("    - ").append(renderClause(cl)).append("\n");
+            }
+        } else if (ir.sections.size() == 2) {
+            var a = ir.sections.get(0);
+            var b = ir.sections.get(1);
+
+            sb.append("  ").append(parentStem(a.anchor)).append("\n");
+            sb.append("    - ").append(renderClause(a.clauses.get(0))).append("\n\n");
+
+            sb.append("  ").append("[and]").append("\n");
+            sb.append("  ").append(parentStem(b.anchor)).append("\n");
+            sb.append("    - ").append(renderClause(b.clauses.get(0))).append("\n");
+        } else {
+            throw new IllegalStateException("Expected 1 or 2 sections; got " + ir.sections.size());
+        }
+
+        sb.append("then\n");
+        for (var eff : ir.thenEffects) {
+            if (eff.type == RuleIR.ThenEffect.Type.ERROR_CODE) {
+                for (String c : eff.values) {
+                    sb.append("  Add error code \"").append(c).append("\"\n");
+                }
+            }
+        }
+        sb.append("end\n");
+        return sb.toString();
+    }
+
+    // ── Clause rendering with the agreed wording rules ──────────────────────────
+
+    private String renderClause(RuleIR.Clause c) {
+        boolean isExistential = (c.op == Signature.OpFamily.EX) ||
+                (c.op == Signature.OpFamily.NEX && (c.values == null || c.values.isEmpty()));
+
+        String label = prettyLabel(c.path);
+
+        if (isExistential) {
+            String prefix = (c.op == Signature.OpFamily.EX) ? "with" : "without";
+            return prefix + " " + label + " exists";
+        }
+
+        // Value comparisons: always "with"
+        String opWord = operatorWord(c.op);
+        String valueStr = renderValuesNoBrackets(c.values);
+        return "with " + label + " " + opWord + " " + valueStr;
+    }
+
+    private String parentStem(Signature.Anchor a) {
+        return ANCHOR_MACROS.getOrDefault(a, fallbackStem(a));
+    }
+
+    private List<RuleIR.Clause> sortClauses(List<RuleIR.Clause> clauses) {
+        // Stable, readable ordering when two lines exist
+        return clauses.stream()
+                .sorted(Comparator
+                        .comparing((RuleIR.Clause c) -> c.path)
+                        .thenComparing(c -> c.op.name())
+                        .thenComparing(c -> c.values == null || c.values.isEmpty() ? "" : c.values.get(0)))
+                .collect(Collectors.toList());
+    }
+
+    private String operatorWord(Signature.OpFamily op) {
+        return switch (op) {
+            case EQ  -> "equals";
+            case NEX -> "not equals";
+            case IN  -> "in";
+            case NIN -> "not in";
+            case EX  -> "exists";
+        };
+    }
+
+    private String renderValuesNoBrackets(List<String> vals) {
+        if (vals == null || vals.isEmpty()) return "\"\"";
+        if (vals.size() == 1) return quote(vals.get(0));
+        return vals.stream().map(this::quote).collect(Collectors.joining(","));
+    }
+
+    private String quote(String s) { return "\"" + s + "\""; }
+
+    // ── Label prettifier: drop root, split '.', de-camel, preserve acronyms ─────
+    private String prettyLabel(String dottedPath) {
+        if (dottedPath == null || dottedPath.isBlank()) return "";
+        String p = dottedPath.trim();
+
+        int firstDot = p.indexOf('.');
+        String withoutRoot = (firstDot > 0 && firstDot + 1 < p.length())
+                ? p.substring(firstDot + 1)
+                : p;
+
+        String[] tokens = withoutRoot.split("\\.");
+        List<String> words = new ArrayList<>();
+        for (String t : tokens) {
+            if (t.isBlank()) continue;
+            words.addAll(deCamelToWords(t));
+        }
+
+        // Lowercase by default, then uppercase known acronyms
+        for (int i = 0; i < words.size(); i++) {
+            String w = words.get(i);
+            String up = w.toUpperCase(Locale.ROOT);
+            if (ACRONYMS.contains(up)) {
+                words.set(i, up);
+            } else {
+                words.set(i, w.toLowerCase(Locale.ROOT));
+            }
+        }
+
+        // Drop trailing "value" if redundant
+        if (!words.isEmpty()) {
+            String last = words.get(words.size() - 1);
+            if ("value".equalsIgnoreCase(last)) {
+                words.remove(words.size() - 1);
+            }
+        }
+
+        return String.join(" ", words);
+    }
+
+    private List<String> deCamelToWords(String token) {
+        // Split "previousProcedure" -> ["previous","Procedure"], "statementCode" -> ["statement","Code"]
+        String spaced = token
+                .replaceAll("([a-z0-9])([A-Z])", "$1 $2")
+                .replaceAll("([A-Z])([A-Z][a-z])", "$1 $2"); // handle ALLCAPS followed by Camel
+        String[] parts = spaced.split("[_\\s]+");
+        return Arrays.asList(parts);
+    }
 }
