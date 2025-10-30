@@ -1,160 +1,230 @@
-// --------------------------- helpers (keep private) ---------------------------
+public record Signature(
+        String ifPath,                 // e.g. "goodsItem.previousProcedure.code"
+        String ifOpSymbol,             // e.g. "==", "in", "exists"
+        java.util.List<String> ifValues,
 
-// Example: turn your operator/kind enums into the DSL operator symbol
-private String resolveOpForIf(Signature sig) {
-    // Prefer your canonical mapping. This example assumes equals / in / exists patterns.
-    return switch (sig.ifKind.op()) {
-        case EQUALS -> "==";
-        case IN     -> "in";
-        case EXISTS -> "exists";
-        default     -> sig.ifKind.op().symbol(); // or throw
-    };
-}
+        String thenPath,               // e.g. "goodsItem.requestedProcedure.code"
+        String thenOpSymbol,           // e.g. "==", "in"
+        java.util.List<String> thenValues,
 
-private String resolveOpForThen(Signature sig) {
-    // Some teams use the same symbol set for THEN filters; adapt as needed.
-    return switch (sig.thenKind.op()) {
-        case EQUALS -> "==";
-        case IN     -> "in";
-        default     -> sig.thenKind.op().symbol();
-    };
-}
+        boolean thenNegated,           // true if THEN is logically negated (e.g., "must NOT contain ...")
+        java.util.List<String> errorCodes, // keep duplicates if you need pipes "A|A|B"
 
-// Whether THEN is logically negated for this row (e.g., "must not contain ...")
-private boolean isThenNegated(Signature sig) {
-    return sig.thenEffect() != null && sig.thenEffect().isNegated();
-}
+        String procCategory,           // optional pass-through; can be null
+        String decType                 // optional pass-through; can be null
+) {
+    public Signature {
+        ifPath       = ifPath == null ? "" : ifPath;
+        ifOpSymbol   = ifOpSymbol == null ? "" : ifOpSymbol;
+        ifValues     = ifValues == null ? java.util.List.of() : java.util.List.copyOf(ifValues);
 
-// Safe accessors for parsed values (normalise to List<String>)
-private java.util.List<String> valuesOf(ParsedClause clause) {
-    return clause == null ? java.util.List.of() : clause.values();
-}
+        thenPath     = thenPath == null ? "" : thenPath;
+        thenOpSymbol = thenOpSymbol == null ? "" : thenOpSymbol;
+        thenValues   = thenValues == null ? java.util.List.of() : java.util.List.copyOf(thenValues);
 
-private String pathOf(ParsedClause clause) {
-    return clause == null ? "" : clause.path();
-}
+        errorCodes   = errorCodes == null ? java.util.List.of() : java.util.List.copyOf(errorCodes);
+        // procCategory and decType may be null; EmitContext can fall back to row values if needed.
+    }
 
+    // Convenience queries most emitters/registries end up using
+    public boolean ifIsExists()   { return "exists".equalsIgnoreCase(ifOpSymbol); }
+    public boolean thenIsExists() { return "exists".equalsIgnoreCase(thenOpSymbol); }
+    public boolean ifHasNoValues(){ return ifValues.isEmpty(); }
+    public boolean thenHasNoValues(){ return thenValues.isEmpty(); }
 
-// --------------------------- main loop ---------------------------
-public void collectAll(java.util.List<RuleRow> rows,
-                       EmitterRegistry registry,
-                       DslrFileWriter dsl) {
+    // Fluent “with…” helpers (handy if you tweak after parsing)
+    public Signature withProcCategory(String pc) { return new Signature(
+            ifPath, ifOpSymbol, ifValues,
+            thenPath, thenOpSymbol, thenValues,
+            thenNegated, errorCodes,
+            pc, decType
+    ); }
 
-    for (RuleRow row : rows) {
-        try {
-            // (1) Parse → build a Signature (you already do this)
-            //     Signature holds the "IF" and "THEN" shapes + effect (error codes, negation, etc.)
-            Signature sig = signatureFor(row); // your existing method
+    public Signature withDecType(String dt) { return new Signature(
+            ifPath, ifOpSymbol, ifValues,
+            thenPath, thenOpSymbol, thenValues,
+            thenNegated, errorCodes,
+            procCategory, dt
+    ); }
 
-            // (2) Build the two Clause objects (IF & THEN) the emitters will reason about
-            GenericEmitter.Clause ifClause = new GenericEmitter.Clause(
-                    pathOf(sig.ifClauseParsed()),           // e.g., "goodsItem.previousProcedure.code"
-                    resolveOpForIf(sig),                    // e.g., "==", "in", "exists"
-                    valuesOf(sig.ifClauseParsed())          // e.g., ["10D"] or []
-            );
+    public Signature withErrorCodes(java.util.List<String> codes) { return new Signature(
+            ifPath, ifOpSymbol, ifValues,
+            thenPath, thenOpSymbol, thenValues,
+            thenNegated, codes,
+            procCategory, decType
+    ); }
 
-            GenericEmitter.Clause thenClause = new GenericEmitter.Clause(
-                    pathOf(sig.thenClauseParsed()),         // e.g., "goodsItem.requestedProcedure.code"
-                    resolveOpForThen(sig),                  // e.g., "==", "in"
-                    valuesOf(sig.thenClauseParsed())        // e.g., ["1LP","1LR"]
-            );
+    // Static factories to keep call sites clean
+    public static Signature of(String ifPath, String ifOp, java.util.List<String> ifVals,
+                               String thenPath, String thenOp, java.util.List<String> thenVals,
+                               boolean thenNegated, java.util.List<String> errorCodes) {
+        return new Signature(ifPath, ifOp, ifVals, thenPath, thenOp, thenVals, thenNegated, errorCodes, null, null);
+    }
 
-            // (3) Assemble the EmitContext (single place all emitters read from)
-            EmitContext ctx = new EmitContext(
-                    row.ruleId(),                           // keep your identifiers handy for messages
-                    row.procCategory(),                     // if you propagate ProcCat/DecType
-                    row.decType(),
-                    ifClause,
-                    thenClause,
-                    isThenNegated(sig),                     // THEN negation flag
-                    sig.thenEffect().errorCodes(),          // List<String> error codes (can repeat)
-                    sig.meta()                              // anything else useful (anchor scope, etc.)
-            );
-
-            // (4) Hand off to the registry (it will select an emitter via canHandle(ctx))
-            registry.emit(ctx, dsl);
-
-        } catch (Exception e) {
-            System.out.println("⚠ FAIL row " + row.ruleId() + " :: " + e.getMessage());
-            // continue to next row
-        }
+    public static Signature ofWithContext(String ifPath, String ifOp, java.util.List<String> ifVals,
+                                          String thenPath, String thenOp, java.util.List<String> thenVals,
+                                          boolean thenNegated, java.util.List<String> errorCodes,
+                                          String procCategory, String decType) {
+        return new Signature(ifPath, ifOp, ifVals, thenPath, thenOp, thenVals, thenNegated, errorCodes, procCategory, decType);
     }
 }
 
 
-// --------------------------- example emitter usage ---------------------------
-// inside some emitter:
-public boolean canHandle(EmitContext ctx) {
-    // Example: RP-PP shape: IF previousProcedure.code == X AND THEN requestedProcedure.code == Y
-    return ctx.ifClause().path().endsWith("previousProcedure.code")
-            && ctx.thenClause().path().endsWith("requestedProcedure.code")
-            && !ctx.isThenNegated();
-}
+// after you’ve parsed the Excel row into canonical path/op/values:
+Signature sig = Signature.ofWithContext(
+        canonicalIfPath,   mappedIfOpSymbol,   parsedIfValues,
+        canonicalThenPath, mappedThenOpSymbol, parsedThenValues,
+        parsedThenNegated, parsedErrorCodes,
+        /* optional: */ row.procCategory(), row.decType()
+);
 
-public void emit(EmitContext ctx, DslrFileWriter dsl) {
-    // Existence line (anchor) – pick one side's domain as your scope
-    dsl.whenLine("GoodsItem exists");
+// Build EmitContext using fields directly from Signature
+Clause ifClause  = new Clause(sig.ifPath(),  sig.ifOpSymbol(),  sig.ifValues());
+Clause thenClause= new Clause(sig.thenPath(),sig.thenOpSymbol(),sig.thenValues());
 
-    // Dash lines (conditions)
-    GenericEmitter.Clause ifc = ctx.ifClause();
-    if (!ifc.values().isEmpty()) {
-        for (String v : ifc.values()) {
-            dsl.whenLine("- previousProcedure.code " + ifc.op() + " {" + v + "}");
-        }
-    }
+EmitContext ctx = new EmitContext(
+        row.ruleId(),
+        sig.procCategory() != null ? sig.procCategory() : row.procCategory(),
+        sig.decType()      != null ? sig.decType()      : row.decType(),
+        ifClause,
+        thenClause,
+        sig.thenNegated(),
+        sig.errorCodes()
+);
 
-    GenericEmitter.Clause thc = ctx.thenClause();
-    if (!thc.values().isEmpty()) {
-        for (String v : thc.values()) {
-            dsl.whenLine("- requestedProcedure.code " + thc.op() + " {" + v + "}");
-        }
-    }
-
-    // THEN side – format your error codes (allowing duplicates if you need pipes)
-    String joined = String.join("|", ctx.errorCodes());
-    if (ctx.isThenNegated()) {
-        dsl.thenLine("Emit BR error (negated): " + joined);
-    } else {
-        dsl.thenLine("Emit BR error: " + joined);
-    }
-}
+registry.emit(ctx, dsl);
 
 
-// --------------------------- EmitContext (shape) ---------------------------
+
 public final class EmitContext {
+
+    // -------- nested small value object --------
+    public static final class Clause {
+        private final String path;                 // e.g. "goodsItem.previousProcedure.code"
+        private final String op;                   // e.g. "==", "in", "exists"
+        private final java.util.List<String> values;
+
+        public Clause(String path, String op, java.util.List<String> values) {
+            this.path   = path   == null ? "" : path;
+            this.op     = op     == null ? "" : op;
+            this.values = values == null ? java.util.List.of() : java.util.List.copyOf(values);
+        }
+        public String path() { return path; }
+        public String op() { return op; }
+        public java.util.List<String> values() { return values; }
+
+        public boolean isExists()    { return "exists".equalsIgnoreCase(op); }
+        public boolean hasNoValues() { return values.isEmpty(); }
+    }
+    // -------------------------------------------
+
     private final String ruleId;
     private final String procCategory;
     private final String decType;
-    private final GenericEmitter.Clause ifClause;
-    private final GenericEmitter.Clause thenClause;
+    private final Clause ifClause;
+    private final Clause thenClause;
     private final boolean thenNegated;
-    private final java.util.List<String> errorCodes; // allow duplicates to preserve pipes
-    private final java.util.Map<String, Object> meta;
+    private final java.util.List<String> errorCodes;
 
     public EmitContext(String ruleId,
                        String procCategory,
                        String decType,
-                       GenericEmitter.Clause ifClause,
-                       GenericEmitter.Clause thenClause,
+                       Clause ifClause,
+                       Clause thenClause,
                        boolean thenNegated,
-                       java.util.List<String> errorCodes,
-                       java.util.Map<String, Object> meta) {
-        this.ruleId = ruleId;
+                       java.util.List<String> errorCodes) {
+
+        this.ruleId = ruleId == null ? "" : ruleId;
         this.procCategory = procCategory;
         this.decType = decType;
         this.ifClause = ifClause;
         this.thenClause = thenClause;
         this.thenNegated = thenNegated;
         this.errorCodes = errorCodes == null ? java.util.List.of() : java.util.List.copyOf(errorCodes);
-        this.meta = meta == null ? java.util.Map.of() : java.util.Map.copyOf(meta);
     }
 
     public String ruleId() { return ruleId; }
     public String procCategory() { return procCategory; }
     public String decType() { return decType; }
-    public GenericEmitter.Clause ifClause() { return ifClause; }
-    public GenericEmitter.Clause thenClause() { return thenClause; }
+    public Clause ifClause() { return ifClause; }
+    public Clause thenClause() { return thenClause; }
     public boolean isThenNegated() { return thenNegated; }
     public java.util.List<String> errorCodes() { return errorCodes; }
-    public java.util.Map<String,Object> meta() { return meta; }
+}
+
+
+public record Signature(
+        String ifPath, String ifOpSymbol, java.util.List<String> ifValues,
+        String thenPath, String thenOpSymbol, java.util.List<String> thenValues,
+        boolean thenNegated, java.util.List<String> errorCodes,
+        String procCategory, String decType
+) {
+    public Signature {
+        ifPath       = ifPath == null ? "" : ifPath;
+        ifOpSymbol   = ifOpSymbol == null ? "" : ifOpSymbol;
+        ifValues     = ifValues == null ? java.util.List.of() : java.util.List.copyOf(ifValues);
+        thenPath     = thenPath == null ? "" : thenPath;
+        thenOpSymbol = thenOpSymbol == null ? "" : thenOpSymbol;
+        thenValues   = thenValues == null ? java.util.List.of() : java.util.List.copyOf(thenValues);
+        errorCodes   = errorCodes == null ? java.util.List.of() : java.util.List.copyOf(errorCodes);
+    }
+}
+
+
+public void collectAll(java.util.List<RuleRow> rows,
+                       EmitterRegistry registry,
+                       DslrFileWriter dsl) {
+
+    for (RuleRow row : rows) {
+        try {
+            // Parse the row into canonical parts (use whatever you already have)
+            Signature sig = parseToSignature(row); // your method
+
+            EmitContext.Clause ifC = new EmitContext.Clause(
+                    sig.ifPath(), sig.ifOpSymbol(), sig.ifValues()
+            );
+
+            EmitContext.Clause thenC = new EmitContext.Clause(
+                    sig.thenPath(), sig.thenOpSymbol(), sig.thenValues()
+            );
+
+            EmitContext ctx = new EmitContext(
+                    row.ruleId(),
+                    sig.procCategory() != null ? sig.procCategory() : row.procCategory(),
+                    sig.decType()      != null ? sig.decType()      : row.decType(),
+                    ifC,
+                    thenC,
+                    sig.thenNegated(),
+                    sig.errorCodes()   // allow duplicates if you want pipe-joining "A|A|B"
+            );
+
+            registry.emit(ctx, dsl);
+
+        } catch (Exception e) {
+            System.out.println("FAIL row " + row.ruleId() + " :: " + e.getMessage());
+        }
+    }
+}
+
+
+public boolean canHandle(EmitContext ctx) {
+    return ctx.ifClause().path().endsWith("previousProcedure.code")
+            && ctx.thenClause().path().endsWith("requestedProcedure.code")
+            && !ctx.isThenNegated();
+}
+
+public void emit(EmitContext ctx, DslrFileWriter dsl) {
+    dsl.whenLine("GoodsItem exists");
+
+    EmitContext.Clause ifc = ctx.ifClause();
+    for (String v : ifc.values()) {
+        dsl.whenLine("- previousProcedure.code " + ifc.op() + " {" + v + "}");
+    }
+
+    EmitContext.Clause thc = ctx.thenClause();
+    for (String v : thc.values()) {
+        dsl.whenLine("- requestedProcedure.code " + thc.op() + " {" + v + "}");
+    }
+
+    dsl.thenLine("Emit BR error: " + String.join("|", ctx.errorCodes()));
 }
