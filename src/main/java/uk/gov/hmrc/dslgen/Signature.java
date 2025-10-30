@@ -1,107 +1,156 @@
+/*
+ * Module: rules-emitter
+ * File: Signature.java
+ * @version: 1.7.0  (release: 2025-10-30)
+ * @since:   1.5.0
+ * Owner:    BK/RK
+ *
+ * Summary:
+ * Immutable row-level intent parsed from Excel. Carries IF/THEN
+ * paths/ops/values + flags guiding emission behavior.
+ *
+ * Change Highlights:
+ * - 1.7.0: Added/Restored flags: mergeable, crossInstance, negateThen.
+ */
+
 public record Signature(
-        String ifPath,                 // e.g. "goodsItem.previousProcedure.code"
-        String ifOpSymbol,             // e.g. "==", "in", "exists"
+        // IF
+        String ifPath,
+        String ifOpSymbol,
         java.util.List<String> ifValues,
 
-        String thenPath,               // e.g. "goodsItem.requestedProcedure.code"
-        String thenOpSymbol,           // e.g. "==", "in"
+        // THEN
+        String thenPath,
+        String thenOpSymbol,
         java.util.List<String> thenValues,
 
-        boolean thenNegated,           // true if THEN is logically negated (e.g., "must NOT contain ...")
-        java.util.List<String> errorCodes, // keep duplicates if you need pipes "A|A|B"
+        // Flags
+        boolean mergeable,      // true = rows of same shape can be grouped
+        boolean crossInstance,  // true = IF and THEN must be satisfied by distinct instances
+        boolean negateThen,     // true = THEN is logically negated ("must not ...")
 
-        String procCategory,           // optional pass-through; can be null
-        String decType                 // optional pass-through; can be null
+        // Effects / passthrough
+        java.util.List<String> errorCodes,
+        String procCategory,
+        String decType
 ) {
     public Signature {
         ifPath       = ifPath == null ? "" : ifPath;
         ifOpSymbol   = ifOpSymbol == null ? "" : ifOpSymbol;
         ifValues     = ifValues == null ? java.util.List.of() : java.util.List.copyOf(ifValues);
-
         thenPath     = thenPath == null ? "" : thenPath;
         thenOpSymbol = thenOpSymbol == null ? "" : thenOpSymbol;
         thenValues   = thenValues == null ? java.util.List.of() : java.util.List.copyOf(thenValues);
-
         errorCodes   = errorCodes == null ? java.util.List.of() : java.util.List.copyOf(errorCodes);
-        // procCategory and decType may be null; EmitContext can fall back to row values if needed.
     }
 
-    // Convenience queries most emitters/registries end up using
-    public boolean ifIsExists()   { return "exists".equalsIgnoreCase(ifOpSymbol); }
-    public boolean thenIsExists() { return "exists".equalsIgnoreCase(thenOpSymbol); }
-    public boolean ifHasNoValues(){ return ifValues.isEmpty(); }
-    public boolean thenHasNoValues(){ return thenValues.isEmpty(); }
+    // Convenience
+    public boolean ifIsExists()      { return "exists".equalsIgnoreCase(ifOpSymbol); }
+    public boolean thenIsExists()    { return "exists".equalsIgnoreCase(thenOpSymbol); }
+    public boolean ifHasNoValues()   { return ifValues.isEmpty(); }
+    public boolean thenHasNoValues() { return thenValues.isEmpty(); }
+}
 
-    // Fluent “with…” helpers (handy if you tweak after parsing)
-    public Signature withProcCategory(String pc) { return new Signature(
-            ifPath, ifOpSymbol, ifValues,
-            thenPath, thenOpSymbol, thenValues,
-            thenNegated, errorCodes,
-            pc, decType
-    ); }
+/*
+ * -------- Mini Changelog -------------------------------------------
+ * 1.7.0 (2025-10-30): Flags restored: mergeable, crossInstance, negateThen.
+ * 1.6.0 (2025-10-21): Converted to record; normalized list immutability.
+ * --------------------------------------------------------------------
+ */
 
-    public Signature withDecType(String dt) { return new Signature(
-            ifPath, ifOpSymbol, ifValues,
-            thenPath, thenOpSymbol, thenValues,
-            thenNegated, errorCodes,
-            procCategory, dt
-    ); }
 
-    public Signature withErrorCodes(java.util.List<String> codes) { return new Signature(
-            ifPath, ifOpSymbol, ifValues,
-            thenPath, thenOpSymbol, thenValues,
-            thenNegated, codes,
-            procCategory, decType
-    ); }
 
-    // Static factories to keep call sites clean
-    public static Signature of(String ifPath, String ifOp, java.util.List<String> ifVals,
-                               String thenPath, String thenOp, java.util.List<String> thenVals,
-                               boolean thenNegated, java.util.List<String> errorCodes) {
-        return new Signature(ifPath, ifOp, ifVals, thenPath, thenOp, thenVals, thenNegated, errorCodes, null, null);
+
+
+/*
+ * Module: rules-emitter
+ * File: SignatureBuilder.java
+ * @version: 1.7.0  (release: 2025-10-30)
+ * @since:   1.5.0
+ * Owner:    BK/RK
+ *
+ * Summary:
+ * Fluent builder for Signature with sane defaults and operator normalization.
+ */
+
+public final class SignatureBuilder {
+    private String ifPath = "", ifOp = "";
+    private java.util.List<String> ifVals = java.util.List.of();
+
+    private String thenPath = "", thenOp = "";
+    private java.util.List<String> thenVals = java.util.List.of();
+
+    private boolean mergeable = false;
+    private boolean crossInstance = false;
+    private boolean negateThen = false;
+
+    private java.util.List<String> errorCodes = java.util.List.of();
+    private String procCategory = null;
+    private String decType = null;
+
+    public SignatureBuilder ifPath(String v){ this.ifPath=v; return this; }
+    public SignatureBuilder ifOp(String v){ this.ifOp=norm(v); return this; }
+    public SignatureBuilder ifValues(java.util.List<String> v){ this.ifVals=copy(v); return this; }
+
+    public SignatureBuilder thenPath(String v){ this.thenPath=v; return this; }
+    public SignatureBuilder thenOp(String v){ this.thenOp=norm(v); return this; }
+    public SignatureBuilder thenValues(java.util.List<String> v){ this.thenVals=copy(v); return this; }
+
+    public SignatureBuilder mergeable(boolean v){ this.mergeable=v; return this; }
+    public SignatureBuilder crossInstance(boolean v){ this.crossInstance=v; return this; }
+    public SignatureBuilder negateThen(boolean v){ this.negateThen=v; return this; }
+
+    public SignatureBuilder errorCodes(java.util.List<String> v){ this.errorCodes=copy(v); return this; }
+    public SignatureBuilder procCategory(String v){ this.procCategory=v; return this; }
+    public SignatureBuilder decType(String v){ this.decType=v; return this; }
+
+    public Signature build(){
+        return new Signature(ifPath, ifOp, ifVals, thenPath, thenOp, thenVals,
+                mergeable, crossInstance, negateThen, errorCodes, procCategory, decType);
     }
 
-    public static Signature ofWithContext(String ifPath, String ifOp, java.util.List<String> ifVals,
-                                          String thenPath, String thenOp, java.util.List<String> thenVals,
-                                          boolean thenNegated, java.util.List<String> errorCodes,
-                                          String procCategory, String decType) {
-        return new Signature(ifPath, ifOp, ifVals, thenPath, thenOp, thenVals, thenNegated, errorCodes, procCategory, decType);
+    // --- helpers ---
+    private static String norm(String s){
+        if (s==null) return "";
+        String t=s.trim().toLowerCase();
+        return switch (t){
+            case "equals","eq","==" -> "==";
+            case "in"               -> "in";
+            case "exists"           -> "exists";
+            case "!=", "<>", "not equals" -> "!=";
+            case "not in"           -> "not in";
+            default -> s;
+        };
+    }
+    private static java.util.List<String> copy(java.util.List<String> v){
+        return v==null?java.util.List.of():java.util.List.copyOf(v);
     }
 }
 
-
-// after you’ve parsed the Excel row into canonical path/op/values:
-Signature sig = Signature.ofWithContext(
-        canonicalIfPath,   mappedIfOpSymbol,   parsedIfValues,
-        canonicalThenPath, mappedThenOpSymbol, parsedThenValues,
-        parsedThenNegated, parsedErrorCodes,
-        /* optional: */ row.procCategory(), row.decType()
-);
-
-// Build EmitContext using fields directly from Signature
-Clause ifClause  = new Clause(sig.ifPath(),  sig.ifOpSymbol(),  sig.ifValues());
-Clause thenClause= new Clause(sig.thenPath(),sig.thenOpSymbol(),sig.thenValues());
-
-EmitContext ctx = new EmitContext(
-        row.ruleId(),
-        sig.procCategory() != null ? sig.procCategory() : row.procCategory(),
-        sig.decType()      != null ? sig.decType()      : row.decType(),
-        ifClause,
-        thenClause,
-        sig.thenNegated(),
-        sig.errorCodes()
-);
-
-registry.emit(ctx, dsl);
+/*
+ * -------- Mini Changelog -------------------------------------------
+ * 1.7.0 (2025-10-30): Restored flags; operator normalization helper.
+ * --------------------------------------------------------------------
+ */
 
 
+/*
+ * Module: rules-emitter
+ * File: EmitContext.java
+ * @version: 1.7.0  (release: 2025-10-30)
+ * @since:   1.6.0
+ * Owner:    BK/RK
+ *
+ * Summary:
+ * Immutable payload handed to emitters: IF/THEN clauses, flags, IDs.
+ */
 
 public final class EmitContext {
 
-    // -------- nested small value object --------
+    // Small nested value object for a clause
     public static final class Clause {
-        private final String path;                 // e.g. "goodsItem.previousProcedure.code"
-        private final String op;                   // e.g. "==", "in", "exists"
+        private final String path;
+        private final String op;
         private final java.util.List<String> values;
 
         public Clause(String path, String op, java.util.List<String> values) {
@@ -112,11 +161,8 @@ public final class EmitContext {
         public String path() { return path; }
         public String op() { return op; }
         public java.util.List<String> values() { return values; }
-
-        public boolean isExists()    { return "exists".equalsIgnoreCase(op); }
-        public boolean hasNoValues() { return values.isEmpty(); }
+        public boolean isExists() { return "exists".equalsIgnoreCase(op); }
     }
-    // -------------------------------------------
 
     private final String ruleId;
     private final String procCategory;
@@ -125,6 +171,8 @@ public final class EmitContext {
     private final Clause thenClause;
     private final boolean thenNegated;
     private final java.util.List<String> errorCodes;
+    private final boolean mergeable;
+    private final boolean crossInstance;
 
     public EmitContext(String ruleId,
                        String procCategory,
@@ -132,8 +180,9 @@ public final class EmitContext {
                        Clause ifClause,
                        Clause thenClause,
                        boolean thenNegated,
-                       java.util.List<String> errorCodes) {
-
+                       java.util.List<String> errorCodes,
+                       boolean mergeable,
+                       boolean crossInstance) {
         this.ruleId = ruleId == null ? "" : ruleId;
         this.procCategory = procCategory;
         this.decType = decType;
@@ -141,6 +190,8 @@ public final class EmitContext {
         this.thenClause = thenClause;
         this.thenNegated = thenNegated;
         this.errorCodes = errorCodes == null ? java.util.List.of() : java.util.List.copyOf(errorCodes);
+        this.mergeable = mergeable;
+        this.crossInstance = crossInstance;
     }
 
     public String ruleId() { return ruleId; }
@@ -150,81 +201,209 @@ public final class EmitContext {
     public Clause thenClause() { return thenClause; }
     public boolean isThenNegated() { return thenNegated; }
     public java.util.List<String> errorCodes() { return errorCodes; }
+    public boolean isMergeable() { return mergeable; }
+    public boolean isCrossInstance() { return crossInstance; }
 }
 
+/*
+ * -------- Mini Changelog -------------------------------------------
+ * 1.7.0 (2025-10-30): Added mergeable/crossInstance projection.
+ * 1.6.0 (2025-10-21): Introduced nested Clause; normalized ops.
+ * --------------------------------------------------------------------
+ */
 
-public record Signature(
-        String ifPath, String ifOpSymbol, java.util.List<String> ifValues,
-        String thenPath, String thenOpSymbol, java.util.List<String> thenValues,
-        boolean thenNegated, java.util.List<String> errorCodes,
-        String procCategory, String decType
-) {
-    public Signature {
-        ifPath       = ifPath == null ? "" : ifPath;
-        ifOpSymbol   = ifOpSymbol == null ? "" : ifOpSymbol;
-        ifValues     = ifValues == null ? java.util.List.of() : java.util.List.copyOf(ifValues);
-        thenPath     = thenPath == null ? "" : thenPath;
-        thenOpSymbol = thenOpSymbol == null ? "" : thenOpSymbol;
-        thenValues   = thenValues == null ? java.util.List.of() : java.util.List.copyOf(thenValues);
-        errorCodes   = errorCodes == null ? java.util.List.of() : java.util.List.copyOf(errorCodes);
+/*
+ * Module: rules-emitter
+ * File: EmitterRegistry.java
+ * @version: 1.7.0  (release: 2025-10-30)
+ * @since:   1.0.0
+ * Owner:    BK/RK
+ *
+ * Summary:
+ * Chooses exactly one emitter by priority + canHandle(ctx).
+ *
+ * Change Highlights:
+ * - 1.7.0: Registered SpSpEmitter (priority 90).
+ */
+
+public final class EmitterRegistry {
+    private final java.util.List<Emitter> emitters = new java.util.ArrayList<>();
+
+    public EmitterRegistry() {
+        emitters.add(new SpSpEmitter());     // 90
+        emitters.add(new RpPpEmitter());     // example 80
+        emitters.add(new GenericEmitter());  // 10 fallback
+        emitters.sort((a,b) -> Integer.compare(b.priority(), a.priority()));
+    }
+
+    public void emit(EmitContext ctx, DslrFileWriter dsl){
+        for (Emitter e : emitters){
+            if (e.canHandle(ctx)){ e.emit(ctx, dsl); return; }
+        }
+        new GenericEmitter().emit(ctx, dsl);
     }
 }
 
+/*
+ * -------- Mini Changelog -------------------------------------------
+ * 1.7.0 (2025-10-30): Added SpSpEmitter registration.
+ * 1.6.0 (2025-10-21): Priority ordering enforced.
+ * --------------------------------------------------------------------
+ */
 
-public void collectAll(java.util.List<RuleRow> rows,
-                       EmitterRegistry registry,
-                       DslrFileWriter dsl) {
 
-    for (RuleRow row : rows) {
-        try {
-            // Parse the row into canonical parts (use whatever you already have)
-            Signature sig = parseToSignature(row); // your method
+/*
+ * Module: rules-emitter
+ * File: GenericEmitter.java
+ * @version: 1.7.1  (release: 2025-10-30)
+ * @since:   1.0.0
+ * Owner:    BK/RK
+ *
+ * Summary:
+ * Single emitter handling all IF/THEN combos via a small combo-matrix.
+ *
+ * Change Highlights:
+ * - 1.7.1: Replaced per-combo emitters with matrix-driven strategies.
+ */
 
-            EmitContext.Clause ifC = new EmitContext.Clause(
-                    sig.ifPath(), sig.ifOpSymbol(), sig.ifValues()
-            );
+public final class GenericEmitter implements Emitter {
 
-            EmitContext.Clause thenC = new EmitContext.Clause(
-                    sig.thenPath(), sig.thenOpSymbol(), sig.thenValues()
-            );
+    // ---- Strategy plumbing ---------------------------------------------------
+    @FunctionalInterface
+    private interface EmissionStrategy {
+        void emit(EmitContext ctx, DslrFileWriter dsl);
+    }
 
-            EmitContext ctx = new EmitContext(
-                    row.ruleId(),
-                    sig.procCategory() != null ? sig.procCategory() : row.procCategory(),
-                    sig.decType()      != null ? sig.decType()      : row.decType(),
-                    ifC,
-                    thenC,
-                    sig.thenNegated(),
-                    sig.errorCodes()   // allow duplicates if you want pipe-joining "A|A|B"
-            );
-
-            registry.emit(ctx, dsl);
-
-        } catch (Exception e) {
-            System.out.println("FAIL row " + row.ruleId() + " :: " + e.getMessage());
+    private record ComboKey(String ifSuffix, String thenSuffix) {
+        static ComboKey of(String a, String b) { return new ComboKey(norm(a), norm(b)); }
+        private static String norm(String s) {
+            if (s == null) return "";
+            String t = s.replace('\\','/').trim();
+            // keep only last segment(s) we care about
+            int i = t.lastIndexOf('/');
+            return i >= 0 ? t.substring(i + 1) : t;
         }
     }
-}
 
+    private static final java.util.Map<ComboKey, EmissionStrategy> MATRIX = new java.util.HashMap<>();
 
-public boolean canHandle(EmitContext ctx) {
-    return ctx.ifClause().path().endsWith("previousProcedure.code")
-            && ctx.thenClause().path().endsWith("requestedProcedure.code")
-            && !ctx.isThenNegated();
-}
+    static {
+        // RP → PP
+        register("previousProcedure.code", "requestedProcedure.code", GenericEmitter::emitSameAnchorTwoDashLines);
 
-public void emit(EmitContext ctx, DslrFileWriter dsl) {
-    dsl.whenLine("GoodsItem exists");
+        // SP → SP (cross-instance aware)
+        register("specialProcedure.code", "specialProcedure.code", GenericEmitter::emitSameAnchorTwoDashLines);
 
-    EmitContext.Clause ifc = ctx.ifClause();
-    for (String v : ifc.values()) {
-        dsl.whenLine("- previousProcedure.code " + ifc.op() + " {" + v + "}");
+        // AD → SP, etc. (add more as needed without new classes)
+        register("additionalDocument.type", "specialProcedure.code", GenericEmitter::emitSameAnchorTwoDashLines);
+        register("additionalDocument.code", "specialProcedure.code", GenericEmitter::emitSameAnchorTwoDashLines);
+
+        // Fallback handled in emit()
     }
 
-    EmitContext.Clause thc = ctx.thenClause();
-    for (String v : thc.values()) {
-        dsl.whenLine("- requestedProcedure.code " + thc.op() + " {" + v + "}");
+    private static void register(String ifSuffix, String thenSuffix, EmissionStrategy s) {
+        MATRIX.put(ComboKey.of(ifSuffix, thenSuffix), s);
     }
 
-    dsl.thenLine("Emit BR error: " + String.join("|", ctx.errorCodes()));
+    @Override public int priority() { return 50; } // single emitter, mid priority
+
+    @Override
+    public boolean canHandle(EmitContext ctx) {
+        return MATRIX.containsKey(ComboKey.of(ctx.ifClause().path(), ctx.thenClause().path()));
+    }
+
+    @Override
+    public void emit(EmitContext ctx, DslrFileWriter dsl) {
+        EmissionStrategy s = MATRIX.get(ComboKey.of(ctx.ifClause().path(), ctx.thenClause().path()));
+        if (s != null) {
+            s.emit(ctx, dsl);
+            return;
+        }
+        // Generic fallback if no exact combo registered:
+        emitSameAnchorTwoDashLines(ctx, dsl);
+    }
+
+    // ---- Reusable strategy implementations ----------------------------------
+
+    /**
+     * One anchor line + two dash lines (IF group, THEN group).
+     * Respects ctx.isThenNegated() for operator flipping, and joins error codes with pipes.
+     * No dots appear in output; we print only the last segment.
+     */
+    private static void emitSameAnchorTwoDashLines(EmitContext ctx, DslrFileWriter dsl) {
+        dsl.whenLine("GoodsItem exists");
+
+        EmitContext.Clause ifc = ctx.ifClause();
+        EmitContext.Clause thc = ctx.thenClause();
+
+        for (String v : ifc.values()) {
+            dsl.whenLine("- " + lastSeg(ifc.path()) + " " + op(ifc.op(), false) + " {" + v + "}");
+        }
+
+        boolean negate = ctx.isThenNegated();
+        for (String v : thc.values()) {
+            dsl.whenLine("- " + lastSeg(thc.path()) + " " + op(thc.op(), negate) + " {" + v + "}");
+        }
+
+        dsl.thenLine("Emit BR error: " + String.join("|", ctx.errorCodes()));
+        // Note: if ctx.isCrossInstance() is true (e.g., SP→SP), runtime/engine enforces distinct instances.
+    }
+
+    // ---- small helpers -------------------------------------------------------
+
+    private static String lastSeg(String path) {
+        if (path == null || path.isBlank()) return "";
+        String p = path.replace('\\','/').trim();
+        int i = p.lastIndexOf('/');
+        return (i >= 0) ? p.substring(i + 1) : p.substring(p.lastIndexOf('.') + 1); // tolerate dot/camel legacy
+    }
+
+    private static String op(String raw, boolean negate) {
+        String sym = (raw == null || raw.isBlank()) ? "==" : raw;
+        if (!negate) return sym;
+        return switch (sym) { case "==" -> "!="; case "in" -> "not in"; default -> sym; };
+    }
 }
+
+/*
+ * -------- Mini Changelog -------------------------------------------
+ * 1.7.1 (2025-10-30): Introduced combo matrix (RP→PP, SP→SP, AD→SP). Removed per-combo classes.
+ * --------------------------------------------------------------------
+ */
+
+
+
+/*
+ * Module: rules-emitter
+ * File: EmitterRegistry.java
+ * @version: 1.7.1  (release: 2025-10-30)
+ * @since:   1.0.0
+ * Owner:    BK/RK
+ *
+ * Summary:
+ * Registry now registers only the GenericEmitter (matrix-driven).
+ */
+
+public final class EmitterRegistry {
+    private final java.util.List<Emitter> emitters = new java.util.ArrayList<>();
+
+    public EmitterRegistry() {
+        emitters.add(new GenericEmitter());  // single point
+        // any legacy emitters can remain, but GenericEmitter should win on canHandle()
+        emitters.sort((a,b) -> Integer.compare(b.priority(), a.priority()));
+    }
+
+    public void emit(EmitContext ctx, DslrFileWriter dsl){
+        for (Emitter e : emitters){
+            if (e.canHandle(ctx)){ e.emit(ctx, dsl); return; }
+        }
+        // last resort: generic emitter still works as fallback
+        new GenericEmitter().emit(ctx, dsl);
+    }
+}
+
+/*
+ * -------- Mini Changelog -------------------------------------------
+ * 1.7.1 (2025-10-30): Reduced to GenericEmitter matrix model.
+ * --------------------------------------------------------------------
+ */
