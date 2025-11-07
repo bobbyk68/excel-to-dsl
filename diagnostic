@@ -1,47 +1,34 @@
-set -euo pipefail
+before_script: |
+  set -euo pipefail
+  echo "=== OS & user ==="
+  cat /etc/os-release || true
+  id || true
+  uname -a || true
 
-echo "=== OS & user ==="
-cat /etc/os-release || true
-id || true
-uname -a || true
+  echo "=== Docker socket check ==="
+  if [ -S /var/run/docker.sock ]; then
+    ls -l /var/run/docker.sock
+  else
+    echo "Docker socket MISSING — mount /var/run/docker.sock or use DinD"
+    exit 1
+  fi
 
-echo "=== Docker socket check ==="
-if [ -S /var/run/docker.sock ]; then
-  ls -l /var/run/docker.sock
-  echo "Docker socket PRESENT"
-else
-  echo "Docker socket MISSING — this runner is not mounting /var/run/docker.sock"
-  echo "Fix options: (1) mount socket in runner config, or (2) switch this job to DinD service, or (3) use a Shell runner."
-  exit 1
-fi
+  if ! command -v docker >/dev/null 2>&1; then
+    yum install -y curl tar ca-certificates || true
+    DOCKER_VER=19.03.15
+    curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VER}.tgz" -o /tmp/docker.tgz
+    tar -xzf /tmp/docker.tgz -C /tmp && mv /tmp/docker/* /usr/local/bin/ && rm -rf /tmp/docker /tmp/docker.tgz
+  fi
 
-echo "=== Docker CLI check ==="
-if command -v docker >/dev/null 2>&1; then
-  echo "docker CLI present at: $(command -v docker)"
-else
-  echo "docker CLI missing — installing (RHEL7/yum base)"
-  yum install -y curl tar ca-certificates || true
-  DOCKER_VER=19.03.15
-  curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VER}.tgz" -o /tmp/docker.tgz
-  tar -xzf /tmp/docker.tgz -C /tmp
-  mv /tmp/docker/* /usr/local/bin/
-  rm -rf /tmp/docker /tmp/docker.tgz
-fi
+  if ! docker compose version >/dev/null 2>&1; then
+    mkdir -p /usr/local/lib/docker/cli-plugins
+    COMPOSE_VER=2.20.3
+    curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VER}/docker-compose-linux-x86_64" \
+      -o /usr/local/lib/docker/cli-plugins/docker-compose
+    chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+  fi
 
-echo "=== Compose plugin check ==="
-if docker compose version >/dev/null 2>&1; then
+  export DOCKER_API_VERSION=1.40
+  docker version
   docker compose version
-else
-  mkdir -p /usr/local/lib/docker/cli-plugins
-  COMPOSE_VER=2.20.3
-  curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VER}/docker-compose-linux-x86_64" \
-    -o /usr/local/lib/docker/cli-plugins/docker-compose
-  chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-  docker compose version
-fi
-
-echo "=== Daemon/API check ==="
-export DOCKER_API_VERSION=${DOCKER_API_VERSION:-1.40}   # host is Docker 19.x
-docker version
-docker info | sed -n '1,25p'
-echo "Diagnostics complete ✅"
+  docker info | sed -n '1,25p'
