@@ -1,3 +1,17 @@
+echo "=== Remote check: hit WireMocks from .231 before BDD ==="
+ssh -i ~/.ssh/id_rsa "${CI_ENVIRONMENT_USER}@${CI_ENVIRONMENT_IP}" \
+  "set -x;
+   ss -ltnp | egrep '8000|8095' || netstat -ltnp | egrep '8000|8095';
+   curl -v --max-time 5 \
+     -H 'X-WireMock-Admin-Api: true' \
+     -H 'Accept: application/json' \
+     http://127.0.0.1:8000/__admin | head || echo '8000 failed';
+   curl -v --max-time 5 \
+     -H 'X-WireMock-Admin-Api: true' \
+     -H 'Accept: application/json' \
+     http://127.0.0.1:8095/__admin | head || echo '8095 failed';"
+
+
 before_script: |
   set -euo pipefail
   echo "=== OS & user ==="
